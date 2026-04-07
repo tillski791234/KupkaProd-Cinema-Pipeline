@@ -30,6 +30,7 @@ from config import (
 )
 from comfyui_client import (
     ComfyUIClient, load_workflow_template, build_workflow, calc_frames,
+    load_i2v_template, build_i2v_workflow,
 )
 import director
 import evaluator
@@ -183,6 +184,7 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
     client = ComfyUIClient()
     client.connect()
     template = load_workflow_template()
+    i2v_template = load_i2v_template()  # None if i2v_template.json not available
 
     # ── Phase 1: Scene Breakdown ───────────────────────────────────────
     if not state["scenes"]:
@@ -295,6 +297,10 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
     # ── Phase 3: Video Generation (multiple takes per scene) ──────────
     log.info("=" * 60)
     log.info("PHASE 3: Video Production (%d takes per scene)", TAKES_PER_SCENE)
+    if i2v_template:
+        log.info("  I2V workflow available — scenes with approved keyframes will use image-to-video")
+    else:
+        log.info("  No i2v_template.json found — using text-to-video for all scenes")
     log.info("=" * 60)
 
     scenes_dir = os.path.join(project_dir, "scenes")
@@ -322,15 +328,33 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
 
         frames = calc_frames(scene["duration_seconds"], LTX_FPS)
 
+        # Check if this scene has an approved keyframe for i2v
+        keyframe_path = scene.get("selected_keyframe")
+        use_i2v = i2v_template and keyframe_path and os.path.exists(keyframe_path)
+        uploaded_kf_name = None
+        if use_i2v:
+            log.info("  Using I2V mode with keyframe: %s", os.path.basename(keyframe_path))
+            try:
+                uploaded_kf_name = client.upload_image(keyframe_path)
+            except Exception as e:
+                log.warning("  Failed to upload keyframe: %s — falling back to T2V", e)
+                use_i2v = False
+
         for take_num in range(1, TAKES_PER_SCENE + 1):
             if take_num <= len(scene["takes"]):
                 continue
 
             seed = random.randint(0, 2**32 - 1)
-            log.info("  Take %d/%d: %d frames, seed %d",
-                     take_num, TAKES_PER_SCENE, frames, seed)
+            log.info("  Take %d/%d: %d frames, seed %d (%s)",
+                     take_num, TAKES_PER_SCENE, frames, seed,
+                     "i2v" if use_i2v else "t2v")
 
-            workflow = build_workflow(template, scene["ltx_prompt"], frames, seed)
+            if use_i2v:
+                workflow = build_i2v_workflow(
+                    i2v_template, scene["ltx_prompt"], frames, seed, uploaded_kf_name
+                )
+            else:
+                workflow = build_workflow(template, scene["ltx_prompt"], frames, seed)
 
             try:
                 prompt_id = client.queue_prompt(workflow)

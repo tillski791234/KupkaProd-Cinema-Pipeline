@@ -6,6 +6,14 @@ An autonomous AI movie studio that turns a text prompt or screenplay into a full
 
 Give it a script, go to sleep, wake up to a movie.
 
+### Demo: 10-Minute Nature Documentary from a Single Sentence
+
+This entire video was generated from a prompt under 50 words. The system is fully agentic — give it as little or as much detail as you want. It writes the script, plans every scene, generates character descriptions, and produces the full video autonomously.
+
+https://github.com/matticusnicholas/KupkaProd-Cinema-Pipeline/raw/master/naturedoc.mp4
+
+*\*Light trimming done in post-production to clean up sentence cutoffs.*
+
 ---
 
 ## What It Does
@@ -40,123 +48,159 @@ The entire pipeline runs on your local machine. No API keys, no cloud compute, n
 
 ---
 
-## Requirements
+## What You Need
 
-### Hardware
-- **GPU**: NVIDIA GPU with 12GB+ VRAM (tested on RTX 4090 Laptop 16GB)
-- **RAM**: 32GB+ system RAM recommended
-- **Storage**: ~50GB for models
-
-### Software
-- [ComfyUI](https://github.com/comfyanonymous/ComfyUI) (v0.18+) with:
-  - [ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo) — LTX-AV video generation nodes
-  - [ComfyUI-VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite) — Video output nodes (optional, depends on your workflow)
-  - A working LTX-AV text-to-video workflow that you've tested manually
-  - A fast image generation model for keyframes (Z-Image Turbo recommended, but any model works)
-  - Required model files (download links in the [ComfyUI-LTXVideo repo](https://github.com/Lightricks/ComfyUI-LTXVideo)):
-    - LTX video model (e.g. `ltx-2.3-22b-distilled`)
-    - Video VAE (`LTX23_video_vae_bf16.safetensors`)
-    - Audio VAE (`LTX23_audio_vae_bf16.safetensors`)
-    - Text encoder (e.g. `gemma_3_12B_it_fp4_mixed.safetensors`)
-  - FFmpeg (usually bundled with ComfyUI on Windows)
-- [Ollama](https://ollama.ai/) with at least one model pulled:
-  - `gemma4:e4b` (recommended — fast, good quality, multimodal for image evaluation)
-  - Or any other Ollama chat model (configure in Settings)
-- Python 3.10+
-
-### Python Dependencies
-```bash
-pip install websocket-client ollama opencv-python Pillow requests sv_ttk
-```
+- **GPU**: NVIDIA with 12GB+ VRAM (tested on RTX 4090 Laptop 16GB)
+- **RAM**: 32GB+ recommended
+- **Storage**: ~50GB for AI models
+- **Python**: 3.10 or newer
+- **ComfyUI**: Installed and working ([download here](https://github.com/comfyanonymous/ComfyUI))
+- **Ollama**: Installed ([download here](https://ollama.ai/))
 
 ---
 
-## Quick Start
+## Setup (Step by Step)
 
-### 1. Clone and Install
+### Step 1: Download This Repo
+
 ```bash
-git clone https://github.com/YOUR_USERNAME/KupkaProd-Cinema-Pipeline.git
+git clone https://github.com/matticusnicholas/KupkaProd-Cinema-Pipeline.git
 cd KupkaProd-Cinema-Pipeline
+```
+
+Or just download the ZIP from GitHub and extract it somewhere.
+
+### Step 2: Install Python Dependencies
+
+Double-click **`setup.bat`** and let it finish.
+
+Or run this yourself:
+```bash
 pip install -r requirements.txt
 ```
-Or on Windows, just double-click `setup.bat`.
 
-### 2. Install Ollama and Pull a Model
-1. Install [Ollama](https://ollama.ai/) if you haven't already
-2. Pull the recommended model:
+### Step 3: Install Ollama and the AI Brain
+
+KupkaProd uses a local AI model to write scripts, plan scenes, and direct your movie. Here's how to set that up:
+
+1. Download and install Ollama from [ollama.ai](https://ollama.ai/)
+2. Open a terminal and pull the model:
 ```bash
 ollama pull gemma4:e4b
 ```
+This downloads Gemma 4 (~5GB). It's the brain that writes all the scene descriptions and dialogue.
 
-### 3. Set Up ComfyUI Workflows
+### Step 4: Download the Video and Image Models for ComfyUI
 
-The agent needs two workflow templates in API format — one for video generation and one for keyframe images. Here's how to get them:
+These are the AI models that actually generate the video and images. You need to download them and put them in the right folders inside your ComfyUI installation.
 
-#### Video Workflow (LTX-AV)
+Your ComfyUI models folder is at something like:
+- `C:\ComfyUI\ComfyUI_windows_portable\ComfyUI\models\` (Windows portable)
+- `ComfyUI/models/` (manual install)
+
+#### Video Models (LTX-AV — this makes the actual video)
+
+Download these from the [ComfyUI-LTXVideo releases](https://github.com/Lightricks/ComfyUI-LTXVideo):
+
+| File | Put it in |
+|------|-----------|
+| `ltx-2.3-22b-distilled` (the video model) | `ComfyUI/models/checkpoints/` |
+| `LTX23_video_vae_bf16.safetensors` (video decoder) | `ComfyUI/models/vae/` |
+| `LTX23_audio_vae_bf16.safetensors` (audio decoder) | `ComfyUI/models/vae/` |
+| `gemma_3_12B_it_fp4_mixed.safetensors` (text encoder) | `ComfyUI/models/text_encoders/` |
+
+#### Image Model (for storyboard keyframes)
+
+You also need a fast image model for the storyboard preview step. Z-Image Turbo is recommended — download it from [Tongyi-MAI/Z-Image](https://github.com/Tongyi-MAI/Z-Image) and put the checkpoint in `ComfyUI/models/checkpoints/`.
+
+Any fast image model works (Flux, SDXL Turbo, etc.). This step just generates quick preview images before the expensive video generation starts.
+
+### Step 5: Install ComfyUI Custom Nodes
+
+You need two custom node packs installed in ComfyUI. The easiest way is through [ComfyUI Manager](https://github.com/ltdrdata/ComfyUI-Manager), or you can clone them directly into `ComfyUI/custom_nodes/`:
+
+- **[ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo)** — The LTX-AV video generation nodes
+- **[ComfyUI-VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite)** — Video output and preview nodes
+
+After installing, restart ComfyUI.
+
+### Step 6: Test the Workflows (Dry Run)
+
+This is the most important step. KupkaProd comes with two ComfyUI workflows in the **`workflows/`** folder. You need to load each one in ComfyUI and make sure it actually works before KupkaProd can use it.
+
+#### Test the Video Workflow
+
 1. Open ComfyUI in your browser (`http://localhost:8188`)
-2. Load your working LTX-AV text-to-video workflow
-3. Make sure it generates video successfully when you queue it manually
-4. Queue it once and let it complete
-5. Now run this Python snippet to grab the API format from history:
-```python
-import json, urllib.request
-with urllib.request.urlopen('http://127.0.0.1:8188/history?max_items=1') as r:
-    history = json.loads(r.read())
-for pid, data in history.items():
-    wf = data['prompt'][2]
-    with open('video_director_agent/workflow_template.json', 'w') as f:
-        json.dump(wf, f, indent=2)
-    print(f'Saved! {len(wf)} nodes')
+2. Drag and drop **`workflows/ltx2.3t2v.json`** into the ComfyUI window
+3. If you see any **red nodes**, you're missing custom nodes — install them and restart ComfyUI
+4. Make sure all the model paths look right (ComfyUI should find your downloaded models automatically)
+5. Click **Queue Prompt** and let it generate a test video
+6. If it works, you're good! If not, fix any errors before continuing
+
+#### Test the Keyframe Workflow
+
+1. Drag and drop **`workflows/keyframegenerator.json`** into ComfyUI
+2. Same deal — fix any red nodes, make sure the image model is loaded
+3. Click **Queue Prompt** and let it generate a test image
+4. If it works, you're ready
+
+#### Test the Image-to-Video Workflow (Optional but Recommended)
+
+If you want KupkaProd to use your approved storyboard keyframes as the starting frame for each scene (instead of generating video purely from text), set up the i2v workflow too:
+
+1. Drag and drop **`workflows/ltxv_i2v_transformersCUSTOMSIGMAS.json`** into ComfyUI
+2. Fix any red nodes, load a test image into the LoadImage node
+3. Click **Queue Prompt** and let it generate a test video from the image
+4. If it works, export it in the next step
+
+If you skip this, KupkaProd will use text-to-video for all scenes. It still works, but your keyframes only serve as a storyboard preview rather than actually guiding the video generation.
+
+#### Already Included: API Templates
+
+KupkaProd ships with pre-exported API templates (`workflow_template.json` and `keyframe_template.json`) that match the included workflows. **If the dry runs above worked without changes, you're done — skip to Step 7.**
+
+If you had to modify the workflows (different models, custom nodes, etc.), re-export them so KupkaProd picks up your changes. Run the workflow in ComfyUI, then immediately run the matching export command:
+
+**Video workflow:**
+```bash
+python -c "import json, urllib.request; r = urllib.request.urlopen('http://127.0.0.1:8188/history?max_items=1'); history = json.loads(r.read()); wf = list(history.values())[0]['prompt'][2]; open('video_director_agent/workflow_template.json','w').write(json.dumps(wf,indent=2)); print(f'Saved video workflow ({len(wf)} nodes)')"
 ```
-6. Open `workflow_template.json` and note the node IDs for: positive prompt (CLIPTextEncode), negative prompt, frame count, and seed nodes. Update these in `config.py` under "Video workflow node IDs"
 
-#### Keyframe Workflow (Z-Image Turbo or any fast image model)
-1. Load your fast image generation workflow in ComfyUI
-2. Queue it once, let it complete
-3. Run the same snippet above but save to `video_director_agent/keyframe_template.json`
-4. Update the keyframe node IDs in `config.py`
-
-#### Finding Node IDs
-After saving your templates, you can inspect them:
-```python
-import json
-with open('video_director_agent/workflow_template.json') as f:
-    wf = json.load(f)
-for nid, node in wf.items():
-    ct = node.get('class_type', '')
-    title = node.get('_meta', {}).get('title', '')
-    print(f'  {nid}: {ct} | {title}')
+**Keyframe workflow:**
+```bash
+python -c "import json, urllib.request; r = urllib.request.urlopen('http://127.0.0.1:8188/history?max_items=1'); history = json.loads(r.read()); wf = list(history.values())[0]['prompt'][2]; open('video_director_agent/keyframe_template.json','w').write(json.dumps(wf,indent=2)); print(f'Saved keyframe workflow ({len(wf)} nodes)')"
 ```
-Look for `CLIPTextEncode` (prompt), `RandomNoise` (seed), and frame count nodes.
 
-### 4. Launch
+**I2V workflow** (optional — only if you set up image-to-video above):
+```bash
+python -c "import json, urllib.request; r = urllib.request.urlopen('http://127.0.0.1:8188/history?max_items=1'); history = json.loads(r.read()); wf = list(history.values())[0]['prompt'][2]; open('video_director_agent/i2v_template.json','w').write(json.dumps(wf,indent=2)); print(f'Saved i2v workflow ({len(wf)} nodes)')"
+```
 
-**GUI mode (recommended):**
+KupkaProd auto-detects which nodes to control in your workflows — no need to edit any code.
+
+### Step 7: Launch KupkaProd
+
+Double-click **`start.bat`**.
+
+Or run:
 ```bash
 python video_director_agent/gui.py
 ```
-Or on Windows, just double-click `start.bat`.
-
-**CLI mode:**
-```bash
-# From a prompt
-python video_director_agent/agent.py "make a 5 minute video about a chef preparing pasta"
-
-# From a script file
-python video_director_agent/agent.py --script my_screenplay.txt --project my_movie
-
-# Resume an interrupted project
-python video_director_agent/agent.py --resume my_movie
-```
-
-### 5. First Run Setup
 
 On first launch, a setup dialog asks for:
-- **ComfyUI root folder** — where ComfyUI is installed
-- **Launch script** — the `.bat` file you use to start ComfyUI
-- **LLM models** — which Ollama models to use for creative vs. evaluation tasks
+- **ComfyUI root folder** — where ComfyUI is installed (e.g. `C:\ComfyUI\ComfyUI_windows_portable`)
+- **Launch script** — the `.bat` file you normally use to start ComfyUI
+- **LLM models** — which Ollama models to use (the defaults are fine)
 
-These are saved to `user_settings.json` and can be changed anytime via the Settings button.
+These settings are saved and can be changed anytime via the Settings button.
+
+### Step 8: Make a Movie
+
+Type a prompt like *"make a 2 minute nature documentary about ocean life"* and click **Start Production**.
+
+Or paste in a full screenplay — KupkaProd auto-detects scripts with scene headings, character names, and dialogue.
+
+Go get coffee. Come back to a movie.
 
 ---
 
@@ -231,6 +275,10 @@ KupkaProd-Cinema-Pipeline/
 ├── README.md
 ├── LICENSE
 ├── trump_standup.txt              # Example script
+├── workflows/
+│   ├── ltx2.3t2v.json             # Video workflow (load in ComfyUI)
+│   ├── keyframegenerator.json     # Keyframe workflow (load in ComfyUI)
+│   └── ltxv_i2v_transformersCUSTOMSIGMAS.json  # Image-to-video workflow
 ├── video_director_agent/
 │   ├── agent.py                   # Main orchestrator + CLI
 │   ├── director.py                # Scene planning + prompt writing (Gemma)
@@ -243,8 +291,9 @@ KupkaProd-Cinema-Pipeline/
 │   ├── reviewer.py                # Take selection GUI
 │   ├── config.py                  # Settings (loads from user_settings.json)
 │   ├── user_settings.json         # Your local paths (git-ignored)
-│   ├── workflow_template.json     # LTX-AV video workflow (API format)
-│   ├── keyframe_template.json     # Z-Image Turbo workflow (API format)
+│   ├── workflow_template.json     # LTX-AV video workflow (API format, included)
+│   ├── keyframe_template.json     # Z-Image Turbo workflow (API format, included)
+│   ├── i2v_template.json          # Image-to-video workflow (API format, user-exported)
 │   ├── logs/                      # Per-run log files
 │   └── output/                    # Generated projects
 │       └── [project_name]/
@@ -279,24 +328,9 @@ All settings are in `video_director_agent/config.py` with user overrides in `use
 
 ### Workflow Node IDs
 
-If you use a different ComfyUI workflow, update the node IDs in `config.py`:
+KupkaProd auto-detects which nodes to control in your ComfyUI workflows. If you're using the included example workflows, everything works out of the box.
 
-```python
-# Video workflow
-PROMPT_NODE_ID = "153:132"       # CLIPTextEncode for positive prompt
-NEG_PROMPT_NODE_ID = "153:123"   # CLIPTextEncode for negative prompt
-FRAMES_NODE_ID = "153:125"       # Frame count input
-SEED_NODE_ID_PASS1 = "153:151"   # Seed for pass 1
-SEED_NODE_ID_PASS2 = "153:127"   # Seed for pass 2
-VIDEO_RES_NODE_ID = "153:124"    # EmptyImage that sets video resolution
-
-# Keyframe workflow
-KF_PROMPT_NODE_ID = "57:27"      # Image prompt
-KF_SEED_NODE_ID = "57:3"         # Image seed
-KF_LATENT_NODE_ID = "57:13"      # Image dimensions
-```
-
-To find your node IDs: queue your workflow in ComfyUI, then check the history endpoint at `http://localhost:8188/history`.
+If you're using a custom workflow and auto-detection isn't finding the right nodes, you can manually set them in `config.py`. This is an advanced option — most users won't need it.
 
 ---
 

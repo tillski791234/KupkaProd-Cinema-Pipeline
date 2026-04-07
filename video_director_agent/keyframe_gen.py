@@ -13,7 +13,7 @@ import ollama
 from config import (
     COMFYUI_OUTPUT_DIR, OLLAMA_MODEL_FAST,
     KF_PROMPT_NODE_ID, KF_SEED_NODE_ID, KF_LATENT_NODE_ID,
-    KF_CANDIDATES, KF_WIDTH, KF_HEIGHT,
+    KF_CANDIDATES, KF_WIDTH, KF_HEIGHT, SKIP_KF_EVAL,
 )
 
 log = logging.getLogger(__name__)
@@ -51,14 +51,56 @@ def load_keyframe_template(path: str = None) -> dict:
         return json.load(f)
 
 
+def _detect_keyframe_nodes(wf: dict) -> dict:
+    """Auto-detect keyframe workflow node IDs from the template."""
+    detected = {
+        "prompt": KF_PROMPT_NODE_ID,
+        "seed": KF_SEED_NODE_ID,
+        "latent": KF_LATENT_NODE_ID,
+    }
+
+    all_present = all(k in wf for k in [KF_PROMPT_NODE_ID, KF_SEED_NODE_ID, KF_LATENT_NODE_ID])
+    if all_present:
+        return detected
+
+    log.info("Default keyframe node IDs not found — auto-detecting...")
+
+    # Find prompt node (CLIPTextEncode)
+    clip_nodes = [nid for nid, n in wf.items()
+                  if isinstance(n, dict) and n.get("class_type") == "CLIPTextEncode"]
+    if clip_nodes:
+        detected["prompt"] = clip_nodes[0]
+
+    # Find seed node (KSampler or KSamplerAdvanced)
+    for cls in ["KSampler", "KSamplerAdvanced", "RandomNoise"]:
+        seed_nodes = [nid for nid, n in wf.items()
+                      if isinstance(n, dict) and n.get("class_type") == cls]
+        if seed_nodes:
+            detected["seed"] = seed_nodes[0]
+            break
+
+    # Find latent node (EmptySD3LatentImage, EmptyLatentImage, etc.)
+    for cls in ["EmptySD3LatentImage", "EmptyLatentImage", "EmptyImage"]:
+        latent_nodes = [nid for nid, n in wf.items()
+                        if isinstance(n, dict) and n.get("class_type") == cls]
+        if latent_nodes:
+            detected["latent"] = latent_nodes[0]
+            break
+
+    log.info("Auto-detected keyframe node IDs: %s", detected)
+    return detected
+
+
 def build_keyframe_workflow(template: dict, prompt_text: str, seed: int,
                             width: int = 1024, height: int = 432) -> dict:
-    """Build a keyframe image workflow with the given prompt and seed."""
+    """Build a keyframe image workflow with the given prompt and seed.
+    Auto-detects node IDs if the configured defaults don't match the template."""
     wf = copy.deepcopy(template)
-    wf[KF_PROMPT_NODE_ID]["inputs"]["text"] = prompt_text
-    wf[KF_SEED_NODE_ID]["inputs"]["seed"] = seed
-    wf[KF_LATENT_NODE_ID]["inputs"]["width"] = width
-    wf[KF_LATENT_NODE_ID]["inputs"]["height"] = height
+    nodes = _detect_keyframe_nodes(wf)
+    wf[nodes["prompt"]]["inputs"]["text"] = prompt_text
+    wf[nodes["seed"]]["inputs"]["seed"] = seed
+    wf[nodes["latent"]]["inputs"]["width"] = width
+    wf[nodes["latent"]]["inputs"]["height"] = height
     return wf
 
 
@@ -278,11 +320,15 @@ def _run_keyframe_round(client, template: dict, scene: dict, characters: dict,
         kf_path = os.path.join(keyframe_dir, kf_filename)
         shutil.copy2(raw_path, kf_path)
 
-        log.info("  Evaluating keyframe %d...", candidate_num)
-        eval_result = evaluate_keyframe(kf_path, scene, characters)
-        log.info("  Keyframe %d: %s -- %s",
-                 candidate_num, eval_result["verdict"],
-                 eval_result.get("fail_reason") or eval_result.get("character_notes", "OK"))
+        if SKIP_KF_EVAL:
+            log.info("  Keyframe %d generated (evaluation skipped)", candidate_num)
+            eval_result = {"verdict": "PASS", "notes": "Evaluation skipped"}
+        else:
+            log.info("  Evaluating keyframe %d...", candidate_num)
+            eval_result = evaluate_keyframe(kf_path, scene, characters)
+            log.info("  Keyframe %d: %s -- %s",
+                     candidate_num, eval_result["verdict"],
+                     eval_result.get("fail_reason") or eval_result.get("character_notes", "OK"))
 
         candidates.append({
             "candidate": candidate_num,

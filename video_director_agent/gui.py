@@ -368,11 +368,17 @@ class DirectorGUI:
                         variable=self.lazy_var).pack(side=tk.LEFT)
 
         opts_frame2 = ttk.Frame(main)
-        opts_frame2.pack(fill=tk.X, pady=(0, 8))
+        opts_frame2.pack(fill=tk.X, pady=(0, 4))
         self.t2v_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(opts_frame2, text="T2V Only (skip keyframe generation — go straight to video)",
                         variable=self.t2v_var,
                         command=self._toggle_t2v).pack(side=tk.LEFT)
+
+        opts_frame3 = ttk.Frame(main)
+        opts_frame3.pack(fill=tk.X, pady=(0, 8))
+        self.skip_kf_eval_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opts_frame3, text="Skip Keyframe Evaluation (experimental — disable AI quality check on keyframes)",
+                        variable=self.skip_kf_eval_var).pack(side=tk.LEFT)
 
         # Takes per scene + scene duration limits
         from config import TAKES_PER_SCENE, SCENE_MIN_SEC, SCENE_MAX_SEC
@@ -560,12 +566,15 @@ class DirectorGUI:
         self.stop_btn.configure(state=tk.NORMAL)
         lazy = self.lazy_var.get()
         t2v_only = self.t2v_var.get()
+        skip_kf_eval = self.skip_kf_eval_var.get()
         mode_str = "script" if is_script else "brief"
         flags = []
         if lazy:
             flags.append("LAZY")
         if t2v_only:
             flags.append("T2V")
+        if skip_kf_eval:
+            flags.append("SKIP_KF_EVAL")
         flags_str = f" [{', '.join(flags)}]" if flags else ""
         self._set_status(f"Starting production ({mode_str}){flags_str}: {project}")
         self._log(f"{'=' * 60}")
@@ -585,7 +594,7 @@ class DirectorGUI:
         }
         self.thread = threading.Thread(
             target=self._run_agent,
-            args=(brief, project, is_script, lazy, res, t2v_only, takes, scene_min, scene_max),
+            args=(brief, project, is_script, lazy, res, t2v_only, takes, scene_min, scene_max, skip_kf_eval),
             daemon=True,
         )
         self.thread.start()
@@ -643,7 +652,8 @@ class DirectorGUI:
 
     def _run_agent(self, brief: str, project_name: str, is_script: bool = False,
                    lazy: bool = False, res: dict = None, t2v_only: bool = False,
-                   takes: int = 3, scene_min: int = 2, scene_max: int = 30):
+                   takes: int = 3, scene_min: int = 2, scene_max: int = 30,
+                   skip_kf_eval: bool = True):
         """Run the agent pipeline in a background thread."""
         import logging
         import config
@@ -651,8 +661,8 @@ class DirectorGUI:
         import agent as agent_mod
 
         # Apply resolution settings to config before anything imports them
+        import keyframe_gen as kf_mod
         if res:
-            import keyframe_gen as kf_mod
             config.KF_WIDTH = res["kf_width"]
             config.KF_HEIGHT = res["kf_height"]
             config.VIDEO_WIDTH = res["video_width"]
@@ -675,6 +685,12 @@ class DirectorGUI:
         if t2v_only:
             config.USE_KEYFRAMES = False
             agent_mod.USE_KEYFRAMES = False
+
+        # Skip keyframe evaluation (experimental feature)
+        if skip_kf_eval:
+            config.SKIP_KF_EVAL = True
+            import keyframe_gen as kf_mod
+            kf_mod.SKIP_KF_EVAL = True
 
         # Redirect logging to GUI
         class GUIHandler(logging.Handler):
@@ -709,8 +725,21 @@ class DirectorGUI:
             self.root.after(0, self._set_status, f"Producing: {project_name}")
             run(brief, project_name, logging.getLogger("agent"), is_script=is_script, lazy=lazy)
 
-            self.root.after(0, self._set_status, "Production complete!")
-            self.root.after(0, self._log, "Done! Check output folder for final.mp4")
+            # Check what state we ended in
+            from agent import load_state as _load_state
+            final_state = _load_state(project_name)
+            if final_state and final_state.get("completed_at"):
+                self.root.after(0, self._set_status, "Production complete!")
+                self.root.after(0, self._log, f"Done! Final film: {final_state.get('final_path', 'check output folder')}")
+            elif final_state and not final_state.get("storyboard_approved"):
+                self.root.after(0, self._set_status, "Storyboard ready — review keyframes and approve, then Start again")
+                self.root.after(0, self._log, "Click 'Storyboard' to review and approve keyframes, then click 'Start Production' to resume.")
+            elif final_state and final_state.get("generation_completed_at"):
+                self.root.after(0, self._set_status, "All takes generated — review and assemble")
+                self.root.after(0, self._log, "Click 'Review Takes' to pick your favorites and assemble the final film.")
+            else:
+                self.root.after(0, self._set_status, "Pipeline paused — click Start to resume")
+                self.root.after(0, self._log, "Run stopped. Click Start Production to resume where you left off.")
 
         except SystemExit:
             self.root.after(0, self._set_status, "Preflight failed — check log")

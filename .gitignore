@@ -10,9 +10,8 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Workflow templates (user must export their own)
-video_director_agent/workflow_template.json
-video_director_agent/keyframe_template.json
+# I2V template (user must export their own — optional)
+video_director_agent/i2v_template.json
 
 # Test files
 video_director_agent/test_breakdown.json

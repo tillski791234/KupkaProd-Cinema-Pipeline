@@ -123,7 +123,7 @@ class ReviewerGUI:
         redo_frame = ttk.Frame(main)
         redo_frame.pack(fill=tk.X, pady=(8, 0))
 
-        self.redo_btn = ttk.Button(redo_frame, text="Reject & Redo Takes",
+        self.redo_btn = ttk.Button(redo_frame, text="Regenerate Takes",
                                     command=self._redo_takes)
         self.redo_btn.pack(side=tk.LEFT)
 
@@ -131,6 +131,10 @@ class ReviewerGUI:
         self.redo_count_var = tk.IntVar(value=3)
         ttk.Spinbox(redo_frame, from_=1, to=10, textvariable=self.redo_count_var,
                      width=3, font=("Segoe UI", 11)).pack(side=tk.LEFT)
+
+        self.clear_old_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(redo_frame, text="Replace old takes",
+                        variable=self.clear_old_var).pack(side=tk.LEFT, padx=(12, 0))
 
         self.redo_status = ttk.Label(redo_frame, text="", foreground="#f9e2af")
         self.redo_status.pack(side=tk.LEFT, padx=12)
@@ -257,15 +261,20 @@ class ReviewerGUI:
         scene = self.scenes[self.current_scene_idx]
         scene_num = scene["scene_number"]
         redo_count = self.redo_count_var.get()
+        clear_old = self.clear_old_var.get()
 
+        action = "Replace all takes with" if clear_old else "Add"
         if messagebox.askyesno("Redo Takes",
-                                f"Reject all takes for scene {scene_num} and generate "
-                                f"{redo_count} new take(s)?\n\n"
+                                f"{action} {redo_count} new take(s) for scene {scene_num}?\n\n"
                                 f"This will run video generation in the background."):
             # Clear old selection
             scene.pop("selected_take", None)
             scene.pop("status", None)
             self.selections.pop(scene_num, None)
+
+            # Optionally clear old takes
+            if clear_old:
+                scene["takes"] = []
 
             # Mark scene for redo
             scene["takes_done"] = False
@@ -289,22 +298,58 @@ class ReviewerGUI:
         import random
         import shutil
         import logging
-        from config import LTX_FPS
-        from comfyui_client import ComfyUIClient, load_workflow_template, build_workflow, calc_frames
+        import time
+        from config import LTX_FPS, COMFYUI_LAUNCHER, COMFYUI_STARTUP_TIMEOUT
+        from comfyui_client import (
+            ComfyUIClient, load_workflow_template, build_workflow, calc_frames,
+            load_i2v_template, build_i2v_workflow,
+        )
 
         log = logging.getLogger("reviewer")
         scene_num = scene["scene_number"]
 
         try:
             client = ComfyUIClient()
+
+            # Check if ComfyUI is running, auto-launch if not
+            if not client.check_alive():
+                self.root.after(0, self.redo_status.configure,
+                                {"text": "ComfyUI not running — launching..."})
+                import subprocess as _sp
+                _sp.Popen(
+                    COMFYUI_LAUNCHER,
+                    cwd=os.path.dirname(COMFYUI_LAUNCHER),
+                    creationflags=_sp.CREATE_NEW_PROCESS_GROUP,
+                )
+                deadline = time.time() + COMFYUI_STARTUP_TIMEOUT
+                while time.time() < deadline:
+                    if client.check_alive():
+                        break
+                    time.sleep(3)
+                else:
+                    raise RuntimeError("ComfyUI did not start in time")
+
             client.connect()
             template = load_workflow_template()
+            i2v_template = load_i2v_template()
 
             project_dir = os.path.join(os.path.dirname(__file__), "output", self.state["project_name"])
             scenes_dir = os.path.join(project_dir, "scenes")
             os.makedirs(scenes_dir, exist_ok=True)
 
             frames = calc_frames(scene["duration_seconds"], LTX_FPS)
+
+            # Check if this scene has an approved keyframe for i2v
+            keyframe_path = scene.get("selected_keyframe")
+            use_i2v = i2v_template and keyframe_path and os.path.exists(keyframe_path)
+            uploaded_kf_name = None
+            if use_i2v:
+                try:
+                    uploaded_kf_name = client.upload_image(keyframe_path)
+                    log.info("Using I2V mode with keyframe: %s", os.path.basename(keyframe_path))
+                except Exception as e:
+                    log.warning("Failed to upload keyframe: %s — falling back to T2V", e)
+                    use_i2v = False
 
             # Start numbering after existing takes
             existing_count = len(scene.get("takes", []))
@@ -315,9 +360,14 @@ class ReviewerGUI:
                 seed = random.randint(0, 2**32 - 1)
 
                 self.root.after(0, self.redo_status.configure,
-                                {"text": f"Scene {scene_num}: generating take {i}/{count}..."})
+                                {"text": f"Scene {scene_num}: take {i}/{count} ({'i2v' if use_i2v else 't2v'})..."})
 
-                workflow = build_workflow(template, scene["ltx_prompt"], frames, seed)
+                if use_i2v:
+                    workflow = build_i2v_workflow(
+                        i2v_template, scene["ltx_prompt"], frames, seed, uploaded_kf_name
+                    )
+                else:
+                    workflow = build_workflow(template, scene["ltx_prompt"], frames, seed)
 
                 try:
                     prompt_id = client.queue_prompt(workflow)
@@ -355,6 +405,7 @@ class ReviewerGUI:
         except Exception as e:
             self.root.after(0, self.redo_status.configure,
                             {"text": f"Error: {e}"})
+            log.error("Redo failed: %s", e, exc_info=True)
         finally:
             self.root.after(0, self.redo_btn.configure, {"state": tk.NORMAL})
 

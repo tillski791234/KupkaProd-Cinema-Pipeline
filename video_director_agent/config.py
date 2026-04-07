@@ -117,6 +117,7 @@ TAKES_PER_SCENE = 3
 USE_KEYFRAMES = True
 KF_CANDIDATES = 4
 LAZY_MODE = False                # AI auto-selects best keyframes and takes (no manual review)
+SKIP_KF_EVAL = True              # Skip AI evaluation of keyframes (experimental)
 EVAL_FRAME_SAMPLE_RATE = 1
 EVAL_MAX_FRAMES = 20
 EVAL_TOKEN_BUDGET = 1024

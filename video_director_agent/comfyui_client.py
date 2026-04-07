@@ -50,6 +50,48 @@ class ComfyUIClient:
         except Exception:
             return False
 
+    def upload_image(self, image_path: str, subfolder: str = "", overwrite: bool = True) -> str:
+        """Upload an image to ComfyUI's input directory. Returns the filename."""
+        import mimetypes
+        filename = os.path.basename(image_path)
+        content_type = mimetypes.guess_type(image_path)[0] or "image/png"
+
+        boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
+        body = b""
+
+        # image file part
+        body += f"--{boundary}\r\n".encode()
+        body += f'Content-Disposition: form-data; name="image"; filename="{filename}"\r\n'.encode()
+        body += f"Content-Type: {content_type}\r\n\r\n".encode()
+        with open(image_path, "rb") as f:
+            body += f.read()
+        body += b"\r\n"
+
+        # subfolder part
+        if subfolder:
+            body += f"--{boundary}\r\n".encode()
+            body += b'Content-Disposition: form-data; name="subfolder"\r\n\r\n'
+            body += subfolder.encode() + b"\r\n"
+
+        # overwrite part
+        body += f"--{boundary}\r\n".encode()
+        body += b'Content-Disposition: form-data; name="overwrite"\r\n\r\n'
+        body += (b"true" if overwrite else b"false") + b"\r\n"
+
+        body += f"--{boundary}--\r\n".encode()
+
+        req = urllib.request.Request(
+            f"http://{self.host}/upload/image",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read())
+        uploaded_name = result.get("name", filename)
+        log.info("Uploaded image to ComfyUI: %s", uploaded_name)
+        return uploaded_name
+
     # ── Queue & Wait ───────────────────────────────────────────────────────
 
     def queue_prompt(self, workflow: dict) -> str:
@@ -159,6 +201,70 @@ class ComfyUIClient:
 
 # ── Workflow helpers ───────────────────────────────────────────────────────
 
+def _find_nodes_by_class(wf: dict, class_type: str) -> list[str]:
+    """Find all node IDs in a workflow matching a given class_type."""
+    return [nid for nid, node in wf.items()
+            if isinstance(node, dict) and node.get("class_type") == class_type]
+
+
+def _detect_video_nodes(wf: dict) -> dict:
+    """Auto-detect video workflow node IDs from the template.
+
+    Returns a dict with keys: prompt, neg_prompt, frames, seed1, seed2, resolution.
+    Falls back to config defaults for any nodes it can't find.
+    """
+    detected = {
+        "prompt": PROMPT_NODE_ID,
+        "neg_prompt": NEG_PROMPT_NODE_ID,
+        "frames": FRAMES_NODE_ID,
+        "seed1": SEED_NODE_ID_PASS1,
+        "seed2": SEED_NODE_ID_PASS2,
+        "resolution": VIDEO_RES_NODE_ID,
+    }
+
+    # Check if defaults already exist in the workflow
+    all_present = all(k in wf for k in [
+        PROMPT_NODE_ID, NEG_PROMPT_NODE_ID, FRAMES_NODE_ID,
+        SEED_NODE_ID_PASS1, SEED_NODE_ID_PASS2, VIDEO_RES_NODE_ID
+    ])
+    if all_present:
+        return detected
+
+    log.info("Default node IDs not found in workflow — auto-detecting...")
+
+    # Find CLIPTextEncode nodes (positive + negative prompt)
+    clip_nodes = _find_nodes_by_class(wf, "CLIPTextEncode")
+    if len(clip_nodes) >= 2:
+        detected["prompt"] = clip_nodes[0]
+        detected["neg_prompt"] = clip_nodes[1]
+    elif len(clip_nodes) == 1:
+        detected["prompt"] = clip_nodes[0]
+
+    # Find RandomNoise nodes (seeds for pass 1 and pass 2)
+    noise_nodes = _find_nodes_by_class(wf, "RandomNoise")
+    if len(noise_nodes) >= 2:
+        detected["seed1"] = noise_nodes[0]
+        detected["seed2"] = noise_nodes[1]
+    elif len(noise_nodes) == 1:
+        detected["seed1"] = noise_nodes[0]
+        detected["seed2"] = noise_nodes[0]
+
+    # Find frame count node (PrimitiveInt or similar)
+    for class_name in ["PrimitiveInt", "Primitive int", "INTConstant"]:
+        frame_nodes = _find_nodes_by_class(wf, class_name)
+        if frame_nodes:
+            detected["frames"] = frame_nodes[0]
+            break
+
+    # Find resolution node (EmptyImage)
+    res_nodes = _find_nodes_by_class(wf, "EmptyImage")
+    if res_nodes:
+        detected["resolution"] = res_nodes[0]
+
+    log.info("Auto-detected node IDs: %s", detected)
+    return detected
+
+
 def load_workflow_template(path: str = None) -> dict:
     """Load the API-format workflow template JSON."""
     if path is None:
@@ -173,15 +279,17 @@ def build_workflow(template: dict, prompt_text: str, frames: int, seed: int) -> 
     Only touches prompt text, frame count, and seeds.
     All other settings (sampler, sigmas, CFG, models, LoRA, etc.)
     stay exactly as tuned in the template.
+    Auto-detects node IDs if the configured defaults don't match the template.
     """
     wf = copy.deepcopy(template)
-    wf[PROMPT_NODE_ID]["inputs"]["text"] = prompt_text
-    wf[NEG_PROMPT_NODE_ID]["inputs"]["text"] = NEGATIVE_PROMPT
-    wf[FRAMES_NODE_ID]["inputs"]["value"] = frames
-    wf[SEED_NODE_ID_PASS1]["inputs"]["noise_seed"] = seed
-    wf[SEED_NODE_ID_PASS2]["inputs"]["noise_seed"] = seed + 1
-    wf[VIDEO_RES_NODE_ID]["inputs"]["width"] = VIDEO_WIDTH
-    wf[VIDEO_RES_NODE_ID]["inputs"]["height"] = VIDEO_HEIGHT
+    nodes = _detect_video_nodes(wf)
+    wf[nodes["prompt"]]["inputs"]["text"] = prompt_text
+    wf[nodes["neg_prompt"]]["inputs"]["text"] = NEGATIVE_PROMPT
+    wf[nodes["frames"]]["inputs"]["value"] = frames
+    wf[nodes["seed1"]]["inputs"]["noise_seed"] = seed
+    wf[nodes["seed2"]]["inputs"]["noise_seed"] = seed + 1
+    wf[nodes["resolution"]]["inputs"]["width"] = VIDEO_WIDTH
+    wf[nodes["resolution"]]["inputs"]["height"] = VIDEO_HEIGHT
     return wf
 
 
@@ -190,3 +298,136 @@ def calc_frames(duration_sec: int, fps: int = LTX_FPS) -> int:
     raw = duration_sec * fps
     n = round((raw - 1) / 8)
     return (8 * n) + 1
+
+
+# ── I2V (Image-to-Video) Workflow ─────────────────────────────────────────
+
+def load_i2v_template(path: str = None) -> dict:
+    """Load the i2v API-format workflow template JSON."""
+    if path is None:
+        path = os.path.join(os.path.dirname(__file__), "i2v_template.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def _find_node_by_title(wf: dict, title: str) -> str | None:
+    """Find a node ID by its _meta title."""
+    for nid, node in wf.items():
+        if isinstance(node, dict):
+            meta_title = node.get("_meta", {}).get("title", "")
+            if meta_title.lower() == title.lower():
+                return nid
+    return None
+
+
+def _detect_i2v_nodes(wf: dict) -> dict:
+    """Auto-detect i2v workflow node IDs from the template."""
+    detected = {}
+
+    # Find prompt node — PrimitiveStringMultiline (titled "Prompt") or CLIPTextEncode
+    prompt_node = _find_node_by_title(wf, "Prompt")
+    if prompt_node:
+        detected["prompt"] = prompt_node
+    else:
+        # Fall back: find PrimitiveStringMultiline, then CLIPTextEncode
+        for cls in ["PrimitiveStringMultiline", "CLIPTextEncode"]:
+            nodes = _find_nodes_by_class(wf, cls)
+            if nodes:
+                detected["prompt"] = nodes[0]
+                break
+
+    # Find negative prompt — second CLIPTextEncode
+    clip_nodes = _find_nodes_by_class(wf, "CLIPTextEncode")
+    if len(clip_nodes) >= 2:
+        detected["neg_prompt"] = clip_nodes[1]
+    elif len(clip_nodes) == 1:
+        detected["neg_prompt"] = clip_nodes[0]
+
+    # Find seed nodes (RandomNoise)
+    noise_nodes = _find_nodes_by_class(wf, "RandomNoise")
+    if len(noise_nodes) >= 2:
+        detected["seed1"] = noise_nodes[0]
+        detected["seed2"] = noise_nodes[1]
+    elif len(noise_nodes) == 1:
+        detected["seed1"] = noise_nodes[0]
+        detected["seed2"] = noise_nodes[0]
+
+    # Find frame count node (titled "Length" or generic PrimitiveInt)
+    length_node = _find_node_by_title(wf, "Length")
+    if length_node:
+        detected["frames"] = length_node
+    else:
+        int_nodes = _find_nodes_by_class(wf, "PrimitiveInt")
+        if int_nodes:
+            detected["frames"] = int_nodes[0]
+
+    # Find width/height nodes by title
+    width_node = _find_node_by_title(wf, "Width")
+    height_node = _find_node_by_title(wf, "Height")
+    if width_node:
+        detected["width"] = width_node
+    if height_node:
+        detected["height"] = height_node
+
+    # Find LoadImage node (for the keyframe input)
+    load_nodes = _find_nodes_by_class(wf, "LoadImage")
+    if load_nodes:
+        detected["load_image"] = load_nodes[0]
+
+    # Find T2V switch (PrimitiveBoolean)
+    switch_node = _find_node_by_title(wf, "Switch to Text to Video?")
+    if switch_node:
+        detected["t2v_switch"] = switch_node
+
+    log.info("Auto-detected i2v node IDs: %s", detected)
+    return detected
+
+
+def build_i2v_workflow(template: dict, prompt_text: str, frames: int, seed: int,
+                       image_filename: str) -> dict:
+    """Clone the i2v template and inject per-scene values + keyframe image.
+
+    image_filename should be the name returned by upload_image() (already in ComfyUI's input dir).
+    """
+    wf = copy.deepcopy(template)
+    nodes = _detect_i2v_nodes(wf)
+
+    # Set prompt text
+    if "prompt" in nodes:
+        node = wf[nodes["prompt"]]
+        if "text" in node.get("inputs", {}):
+            node["inputs"]["text"] = prompt_text
+        elif "value" in node.get("inputs", {}):
+            node["inputs"]["value"] = prompt_text
+
+    # Set negative prompt
+    if "neg_prompt" in nodes:
+        wf[nodes["neg_prompt"]]["inputs"]["text"] = NEGATIVE_PROMPT
+
+    # Set frame count
+    if "frames" in nodes:
+        wf[nodes["frames"]]["inputs"]["value"] = frames
+
+    # Set seeds
+    if "seed1" in nodes:
+        wf[nodes["seed1"]]["inputs"]["noise_seed"] = seed
+    if "seed2" in nodes:
+        wf[nodes["seed2"]]["inputs"]["noise_seed"] = seed + 1
+
+    # Set resolution
+    if "width" in nodes:
+        wf[nodes["width"]]["inputs"]["value"] = VIDEO_WIDTH
+    if "height" in nodes:
+        wf[nodes["height"]]["inputs"]["value"] = VIDEO_HEIGHT
+
+    # Set the keyframe image
+    if "load_image" in nodes:
+        wf[nodes["load_image"]]["inputs"]["image"] = image_filename
+
+    # Make sure T2V switch is off (we want i2v mode)
+    if "t2v_switch" in nodes:
+        wf[nodes["t2v_switch"]]["inputs"]["value"] = False
+
+    return wf
