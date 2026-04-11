@@ -1,20 +1,19 @@
 # keyframe_gen.py -- Keyframe image generation + AI evaluation via Z-Image Turbo
 
-import copy
 import json
 import logging
 import os
 import random
 import shutil
 import base64
-
-import ollama
+import copy
 
 from config import (
     COMFYUI_OUTPUT_DIR, OLLAMA_MODEL_FAST,
     KF_PROMPT_NODE_ID, KF_SEED_NODE_ID, KF_LATENT_NODE_ID,
     KF_CANDIDATES, KF_WIDTH, KF_HEIGHT, SKIP_KF_EVAL,
 )
+from llm_client import chat as llm_chat
 
 log = logging.getLogger(__name__)
 
@@ -191,7 +190,7 @@ Respond with valid JSON:
 "fail_reason": "specific description of what's wrong, or null",
 "character_notes": "what specifically matches or doesn't match the character description"}}"""
 
-    response = ollama.chat(
+    response = llm_chat(
         model=OLLAMA_MODEL_FAST,
         messages=[{"role": "user", "content": eval_prompt, "images": [img_b64]}],
         options={
@@ -278,15 +277,45 @@ Rewrite the prompt to fix these issues. Focus on:
 - If composition was bad: specify the camera angle and framing more clearly
 - Simplify overly complex descriptions that the image model can't handle
 - Keep it to one clear moment — don't describe sequential actions
+- This is a SILENT storyboard image, not a video/audio prompt
+- Do NOT include dialogue quotes, captions, subtitles, speech bubbles, lower thirds, or any readable text
 
 Respond with ONLY the rewritten prompt text, nothing else."""
 
-    response = ollama.chat(
+    response = llm_chat(
         model=OLLAMA_MODEL_FAST,
         messages=[{"role": "user", "content": rewrite_request}],
         options={"num_predict": 2048, "temperature": 0.5},
     )
     return response["message"]["content"].strip()
+
+
+def _keyframe_prompt_suffix() -> str:
+    return (
+        "\n\nSTORYBOARD FRAME RULES:\n"
+        "- This is a single silent storyboard frame for an image model.\n"
+        "- Show only the visual moment, composition, characters, setting, lighting, and action.\n"
+        "- Do NOT render subtitles, captions, speech bubbles, lower thirds, signs, readable labels, or any other readable text.\n"
+        "- Do NOT show written dialogue anywhere in the image.\n"
+    )
+
+
+def _build_keyframe_prompt(scene: dict, brief: str = "") -> str:
+    """Create a visual-only prompt for keyframe generation."""
+    from director import write_prompt
+
+    image_scene = copy.deepcopy(scene)
+    image_scene["dialogue"] = ""
+    image_scene["audio_description"] = ""
+    base_prompt = write_prompt(image_scene, brief=brief).strip()
+    return base_prompt + _keyframe_prompt_suffix()
+
+
+def _needs_keyframe_prompt_refresh(scene: dict) -> bool:
+    prompt = scene.get("keyframe_prompt", "")
+    if not prompt:
+        return True
+    return "STORYBOARD FRAME RULES:" not in prompt
 
 
 def _run_keyframe_round(client, template: dict, scene: dict, characters: dict,
@@ -354,14 +383,12 @@ def generate_keyframes(client, scene: dict, characters: dict,
     Round 1: Try KF_CANDIDATES attempts with the original prompt.
     If all fail, rewrite the prompt based on failure reasons and try again.
     """
-    from director import write_prompt
-
     template = load_keyframe_template()
     scene_num = scene["scene_number"]
 
-    # Write an image-specific prompt (reusing the rich prompt writer)
-    if not scene.get("keyframe_prompt"):
-        scene["keyframe_prompt"] = write_prompt(scene, brief=brief)
+    # Write an image-specific prompt that strips dialogue to avoid burned-in captions.
+    if _needs_keyframe_prompt_refresh(scene):
+        scene["keyframe_prompt"] = _build_keyframe_prompt(scene, brief=brief)
 
     prompt = scene["keyframe_prompt"]
     log.info("  Image prompt (%d words):", len(prompt.split()))

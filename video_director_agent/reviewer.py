@@ -17,18 +17,30 @@ from PIL import Image, ImageTk
 import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from config import FFMPEG_PATH
+import config
+from config import FFMPEG_PATH, get_output_root, project_state_path
 from assembler import concat_scenes
 
 
+def open_with_system_default(path: str):
+    """Open a file in the system default app across platforms."""
+    if os.name == "nt":
+        os.startfile(path)
+        return
+
+    import subprocess
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen([opener, path])
+
+
 def load_state(project_name: str) -> dict:
-    path = os.path.join(os.path.dirname(__file__), "output", project_name, "state.json")
+    path = project_state_path(project_name)
     with open(path) as f:
         return json.load(f)
 
 
 def save_state(state: dict):
-    path = os.path.join(os.path.dirname(__file__), "output", state["project_name"], "state.json")
+    path = project_state_path(state["project_name"])
     with open(path, "w") as f:
         json.dump(state, f, indent=2)
 
@@ -231,7 +243,7 @@ class ReviewerGUI:
 
     def _play(self, path: str):
         """Open video in system default player."""
-        os.startfile(path)
+        open_with_system_default(path)
 
     def _select(self, scene_num: int, path: str):
         """Select a take for a scene."""
@@ -316,11 +328,10 @@ class ReviewerGUI:
                 self.root.after(0, self.redo_status.configure,
                                 {"text": "ComfyUI not running — launching..."})
                 import subprocess as _sp
-                _sp.Popen(
-                    COMFYUI_LAUNCHER,
-                    cwd=os.path.dirname(COMFYUI_LAUNCHER),
-                    creationflags=_sp.CREATE_NEW_PROCESS_GROUP,
-                )
+                kwargs = {"cwd": os.path.dirname(COMFYUI_LAUNCHER)}
+                if os.name == "nt":
+                    kwargs["creationflags"] = _sp.CREATE_NEW_PROCESS_GROUP
+                _sp.Popen(COMFYUI_LAUNCHER, **kwargs)
                 deadline = time.time() + COMFYUI_STARTUP_TIMEOUT
                 while time.time() < deadline:
                     if client.check_alive():
@@ -333,8 +344,8 @@ class ReviewerGUI:
             template = load_workflow_template()
             i2v_template = load_i2v_template()
 
-            project_dir = os.path.join(os.path.dirname(__file__), "output", self.state["project_name"])
-            scenes_dir = os.path.join(project_dir, "scenes")
+            current_project_dir = config.project_dir(self.state["project_name"])
+            scenes_dir = os.path.join(current_project_dir, "scenes")
             os.makedirs(scenes_dir, exist_ok=True)
 
             frames = calc_frames(scene["duration_seconds"], LTX_FPS)
@@ -435,7 +446,7 @@ class ReviewerGUI:
                 return
             paths.append(path)
 
-        final_dir = os.path.join(os.path.dirname(__file__), "output", self.state["project_name"])
+        final_dir = config.project_dir(self.state["project_name"])
         final_path = os.path.join(final_dir, "final.mp4")
 
         self.status_label.configure(text="Assembling final film...")
@@ -451,7 +462,7 @@ class ReviewerGUI:
             self.status_label.configure(text=f"Done! {final_path}")
             if messagebox.askyesno("Assembly Complete",
                                    f"Final film saved to:\n{final_path}\n\nPlay it now?"):
-                os.startfile(final_path)
+                open_with_system_default(final_path)
 
         except Exception as e:
             messagebox.showerror("Assembly Failed", str(e))
@@ -462,7 +473,7 @@ class ReviewerGUI:
 
 
 def list_projects():
-    output_dir = os.path.join(os.path.dirname(__file__), "output")
+    output_dir = get_output_root()
     if not os.path.exists(output_dir):
         print("No projects found.")
         return

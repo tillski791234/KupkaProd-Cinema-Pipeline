@@ -12,6 +12,18 @@
       "title": "Save Image"
     }
   },
+  "62": {
+    "inputs": {
+      "clip_name1": "gemma-3-12b-it-heretic-fp4-comfy.safetensors",
+      "clip_name2": "ltx-2.3_text_projection_bf16.safetensors",
+      "type": "ltxv",
+      "device": "default"
+    },
+    "class_type": "DualCLIPLoader",
+    "_meta": {
+      "title": "DualCLIPLoader"
+    }
+  },
   "57:29": {
     "inputs": {
       "vae_name": "ae.safetensors"
@@ -19,18 +31,6 @@
     "class_type": "VAELoader",
     "_meta": {
       "title": "Load VAE"
-    }
-  },
-  "57:33": {
-    "inputs": {
-      "conditioning": [
-        "57:27",
-        0
-      ]
-    },
-    "class_type": "ConditioningZeroOut",
-    "_meta": {
-      "title": "ConditioningZeroOut"
     }
   },
   "57:8": {
@@ -74,7 +74,7 @@
   },
   "57:13": {
     "inputs": {
-      "width": 2048,
+      "width": 1024,
       "height": 1024,
       "batch_size": 1
     },
@@ -98,7 +98,7 @@
   },
   "57:3": {
     "inputs": {
-      "seed": 0,
+      "seed": 802449327431616,
       "steps": 8,
       "cfg": 1.0,
       "sampler_name": "res_multistep",
@@ -124,6 +124,18 @@
     "class_type": "KSampler",
     "_meta": {
       "title": "KSampler"
+    }
+  },
+  "57:33": {
+    "inputs": {
+      "conditioning": [
+        "57:27",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "ConditioningZeroOut"
     }
   },
   "57:30": {

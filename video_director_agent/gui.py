@@ -21,27 +21,35 @@ def _restart_ollama(log):
     """Kill and restart Ollama to ensure clean state."""
     import subprocess
     import time
+    from llm_client import is_ollama_provider, provider_label
+
+    if not is_ollama_provider():
+        log.info("Skipping Ollama restart because LLM provider is %s.", provider_label())
+        return
 
     log.info("Restarting Ollama...")
     # Kill any running Ollama processes
     try:
-        subprocess.run(["taskkill", "/f", "/im", "ollama.exe"],
-                       capture_output=True, timeout=10)
-        # Also kill the runner process
-        subprocess.run(["taskkill", "/f", "/im", "ollama_llama_server.exe"],
-                       capture_output=True, timeout=10)
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/f", "/im", "ollama.exe"],
+                           capture_output=True, timeout=10)
+            subprocess.run(["taskkill", "/f", "/im", "ollama_llama_server.exe"],
+                           capture_output=True, timeout=10)
+        else:
+            subprocess.run(["pkill", "-f", "ollama"], capture_output=True, timeout=10)
         time.sleep(2)
     except Exception as e:
         log.warning("Could not kill Ollama: %s (may not have been running)", e)
 
     # Start Ollama serve in background
     try:
-        subprocess.Popen(
-            ["ollama", "serve"],
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        kwargs = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        subprocess.Popen(["ollama", "serve"], **kwargs)
     except FileNotFoundError:
         log.warning("ollama not found on PATH, skipping restart")
         return
@@ -83,7 +91,7 @@ class DirectorGUI:
     def _show_welcome_wizard(self, skip_to_settings=False):
         """Multi-page first-run wizard with setup instructions."""
         from tkinter import filedialog
-        from config import save_user_settings, _DEFAULTS
+        from config import save_user_settings, _DEFAULTS, _get
 
         wiz = tk.Toplevel(self.root)
         wiz.title("KupkaProd Cinema Pipeline — Setup Wizard")
@@ -190,7 +198,7 @@ class DirectorGUI:
             ttk.Label(frame, text="Step 5: Configure Paths", style="WizStep.TLabel").pack(anchor="w", pady=(0, 10))
 
             ttk.Label(frame, text="ComfyUI Root Folder:", style="Wiz.TLabel").pack(anchor="w")
-            comfy_var = tk.StringVar(value=_DEFAULTS["comfyui_root"])
+            comfy_var = tk.StringVar(value=_get("comfyui_root"))
             cf = ttk.Frame(frame)
             cf.pack(fill=tk.X, pady=(2, 8))
             ttk.Entry(cf, textvariable=comfy_var, width=55).pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -198,16 +206,39 @@ class DirectorGUI:
                        command=lambda: comfy_var.set(filedialog.askdirectory(title="Select ComfyUI Root") or comfy_var.get())
                        ).pack(side=tk.RIGHT, padx=(8, 0))
 
+            ttk.Label(frame, text="Project Output Folder:", style="Wiz.TLabel").pack(anchor="w")
+            output_var = tk.StringVar(value=_get("project_output_root"))
+            of = ttk.Frame(frame)
+            of.pack(fill=tk.X, pady=(2, 8))
+            ttk.Entry(of, textvariable=output_var, width=55).pack(side=tk.LEFT, fill=tk.X, expand=True)
+            ttk.Button(of, text="Browse...",
+                       command=lambda: output_var.set(filedialog.askdirectory(title="Select Project Output Folder") or output_var.get())
+                       ).pack(side=tk.RIGHT, padx=(8, 0))
+
             ttk.Label(frame, text="ComfyUI Launch Script (filename in root):", style="Wiz.TLabel").pack(anchor="w")
-            launcher_var = tk.StringVar(value=_DEFAULTS["comfyui_launcher"])
+            launcher_var = tk.StringVar(value=_get("comfyui_launcher"))
             ttk.Entry(frame, textvariable=launcher_var, width=55).pack(anchor="w", pady=(2, 8))
 
-            ttk.Label(frame, text="Ollama Model (for planning + evaluation):", style="Wiz.TLabel").pack(anchor="w")
-            model_var = tk.StringVar(value=_DEFAULTS["ollama_model_fast"])
+            ttk.Label(frame, text="LLM Provider:", style="Wiz.TLabel").pack(anchor="w")
+            provider_var = tk.StringVar(value=_get("llm_provider"))
+            ttk.Combobox(
+                frame,
+                textvariable=provider_var,
+                values=("ollama", "openai_compatible"),
+                state="readonly",
+                width=24,
+            ).pack(anchor="w", pady=(2, 8))
+
+            ttk.Label(frame, text="LLM API Base URL:", style="Wiz.TLabel").pack(anchor="w")
+            llm_url_var = tk.StringVar(value=_get("llm_base_url"))
+            ttk.Entry(frame, textvariable=llm_url_var, width=55).pack(anchor="w", pady=(2, 8))
+
+            ttk.Label(frame, text="LLM Model (for planning + evaluation):", style="Wiz.TLabel").pack(anchor="w")
+            model_var = tk.StringVar(value=_get("ollama_model_fast"))
             ttk.Entry(frame, textvariable=model_var, width=40).pack(anchor="w", pady=(2, 8))
 
             # Store vars for save
-            frame._settings_vars = (comfy_var, launcher_var, model_var)
+            frame._settings_vars = (comfy_var, output_var, launcher_var, provider_var, llm_url_var, model_var)
 
         # --- PAGE 7: Ready ---
         def page_ready(frame):
@@ -292,10 +323,14 @@ class DirectorGUI:
                         # Need to find the settings frame - check if vars exist
                         break
                     if hasattr(frame, '_settings_vars'):
-                        comfy_var, launcher_var, model_var = frame._settings_vars
+                        comfy_var, output_var, launcher_var, provider_var, llm_url_var, model_var = frame._settings_vars
                         save_user_settings({
                             "comfyui_root": comfy_var.get(),
+                            "project_output_root": output_var.get(),
                             "comfyui_launcher": launcher_var.get(),
+                            "llm_provider": provider_var.get(),
+                            "llm_base_url": llm_url_var.get(),
+                            "ollama_host": llm_url_var.get(),
                             "ollama_model_creative": model_var.get(),
                             "ollama_model_fast": model_var.get(),
                         })
@@ -379,6 +414,15 @@ class DirectorGUI:
         self.skip_kf_eval_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(opts_frame3, text="Skip Keyframe Evaluation (experimental — disable AI quality check on keyframes)",
                         variable=self.skip_kf_eval_var).pack(side=tk.LEFT)
+
+        opts_frame4 = ttk.Frame(main)
+        opts_frame4.pack(fill=tk.X, pady=(0, 8))
+        self.subtitle_safe_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opts_frame4,
+            text="Subtitle Safe Mode (less literal dialogue prompting to reduce burned-in captions)",
+            variable=self.subtitle_safe_var,
+        ).pack(side=tk.LEFT)
 
         # Takes per scene + scene duration limits
         from config import TAKES_PER_SCENE, SCENE_MIN_SEC, SCENE_MAX_SEC
@@ -567,6 +611,7 @@ class DirectorGUI:
         lazy = self.lazy_var.get()
         t2v_only = self.t2v_var.get()
         skip_kf_eval = self.skip_kf_eval_var.get()
+        subtitle_safe = self.subtitle_safe_var.get()
         mode_str = "script" if is_script else "brief"
         flags = []
         if lazy:
@@ -575,6 +620,8 @@ class DirectorGUI:
             flags.append("T2V")
         if skip_kf_eval:
             flags.append("SKIP_KF_EVAL")
+        if subtitle_safe:
+            flags.append("SAFE_SUBS")
         flags_str = f" [{', '.join(flags)}]" if flags else ""
         self._set_status(f"Starting production ({mode_str}){flags_str}: {project}")
         self._log(f"{'=' * 60}")
@@ -594,7 +641,7 @@ class DirectorGUI:
         }
         self.thread = threading.Thread(
             target=self._run_agent,
-            args=(brief, project, is_script, lazy, res, t2v_only, takes, scene_min, scene_max, skip_kf_eval),
+            args=(brief, project, is_script, lazy, res, t2v_only, takes, scene_min, scene_max, skip_kf_eval, subtitle_safe),
             daemon=True,
         )
         self.thread.start()
@@ -605,11 +652,12 @@ class DirectorGUI:
         self.stop_btn.configure(state=tk.DISABLED)
 
     def _open_storyboard(self):
+        from config import project_state_path
         project = self.project_var.get().strip()
         if not project:
             self._set_status("Enter a project name first!")
             return
-        state_path = os.path.join(os.path.dirname(__file__), "output", project, "state.json")
+        state_path = project_state_path(project)
         if not os.path.exists(state_path):
             self._set_status(f"Project '{project}' doesn't exist yet. Click 'Start Production' first to generate scenes and keyframes.")
             return
@@ -628,11 +676,12 @@ class DirectorGUI:
             self._set_status(f"Error opening storyboard: {e}")
 
     def _open_reviewer(self):
+        from config import project_state_path
         project = self.project_var.get().strip()
         if not project:
             self._set_status("Enter a project name first!")
             return
-        state_path = os.path.join(os.path.dirname(__file__), "output", project, "state.json")
+        state_path = project_state_path(project)
         if not os.path.exists(state_path):
             self._set_status(f"Project '{project}' doesn't exist yet. Run production first.")
             return
@@ -653,7 +702,7 @@ class DirectorGUI:
     def _run_agent(self, brief: str, project_name: str, is_script: bool = False,
                    lazy: bool = False, res: dict = None, t2v_only: bool = False,
                    takes: int = 3, scene_min: int = 2, scene_max: int = 30,
-                   skip_kf_eval: bool = True):
+                   skip_kf_eval: bool = True, subtitle_safe: bool = False):
         """Run the agent pipeline in a background thread."""
         import logging
         import config
@@ -661,6 +710,7 @@ class DirectorGUI:
         import agent as agent_mod
 
         # Apply resolution settings to config before anything imports them
+        import director as director_mod
         import keyframe_gen as kf_mod
         if res:
             config.KF_WIDTH = res["kf_width"]
@@ -677,7 +727,6 @@ class DirectorGUI:
         agent_mod.TAKES_PER_SCENE = takes
         config.SCENE_MIN_SEC = scene_min
         config.SCENE_MAX_SEC = scene_max
-        import director as director_mod
         director_mod.SCENE_MIN_SEC = scene_min
         director_mod.SCENE_MAX_SEC = scene_max
 
@@ -689,8 +738,10 @@ class DirectorGUI:
         # Skip keyframe evaluation (experimental feature)
         if skip_kf_eval:
             config.SKIP_KF_EVAL = True
-            import keyframe_gen as kf_mod
             kf_mod.SKIP_KF_EVAL = True
+
+        config.SUBTITLE_SAFE_MODE = subtitle_safe
+        director_mod.SUBTITLE_SAFE_MODE = subtitle_safe
 
         # Redirect logging to GUI
         class GUIHandler(logging.Handler):
@@ -710,12 +761,14 @@ class DirectorGUI:
         logger.addHandler(handler)
 
         try:
+            from llm_client import is_ollama_provider, provider_label
             from config import COMFYUI_HOST
             from comfyui_client import ComfyUIClient, load_workflow_template
             from agent import preflight, run
 
-            # Restart Ollama to ensure clean state (prevents hanging on model load)
-            self.root.after(0, self._set_status, "Restarting Ollama...")
+            # Restart Ollama only when Ollama is the active provider.
+            prep_status = "Restarting Ollama..." if is_ollama_provider() else f"Preparing {provider_label()}..."
+            self.root.after(0, self._set_status, prep_status)
             _restart_ollama(logging.getLogger("agent"))
 
             client = ComfyUIClient()

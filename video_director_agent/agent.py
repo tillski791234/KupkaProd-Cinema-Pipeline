@@ -23,15 +23,17 @@ from datetime import datetime
 # Add this directory to path so config imports work
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import config
 from config import (
-    COMFYUI_HOST, TAKES_PER_SCENE, OUTPUT_DIR, COMFYUI_OUTPUT_DIR,
+    COMFYUI_HOST, TAKES_PER_SCENE, COMFYUI_OUTPUT_DIR,
     OLLAMA_MODEL, LTX_FPS, COMFYUI_LAUNCHER, COMFYUI_STARTUP_TIMEOUT,
-    FFMPEG_PATH, USE_KEYFRAMES,
+    FFMPEG_PATH, USE_KEYFRAMES, project_state_path,
 )
 from comfyui_client import (
     ComfyUIClient, load_workflow_template, build_workflow, calc_frames,
     load_i2v_template, build_i2v_workflow,
 )
+from llm_client import ensure_model_available, provider_label, unload_model
 import director
 import evaluator
 import assembler
@@ -57,7 +59,7 @@ def setup_logging(project_name: str):
 # ── State Management ───────────────────────────────────────────────────────
 
 def state_path(project_name: str) -> str:
-    return os.path.join(os.path.dirname(__file__), "output", project_name, "state.json")
+    return project_state_path(project_name)
 
 
 def load_state(project_name: str) -> dict | None:
@@ -91,9 +93,8 @@ def _unload_model(log):
     """Unload the heavy creative model from VRAM to free it for ComfyUI."""
     from config import OLLAMA_MODEL_CREATIVE
     try:
-        import ollama as _ollama
         log.info("Unloading %s from VRAM to free GPU for ComfyUI...", OLLAMA_MODEL_CREATIVE)
-        _ollama.generate(model=OLLAMA_MODEL_CREATIVE, prompt="", keep_alive=0)
+        unload_model(OLLAMA_MODEL_CREATIVE, log)
         log.info("Model unloaded.")
     except Exception as e:
         log.warning("Could not unload model: %s (not critical)", e)
@@ -105,11 +106,10 @@ def launch_comfyui(log):
     """Launch ComfyUI in the background and wait until it's reachable."""
     import subprocess as _sp
     log.info("Launching ComfyUI: %s", COMFYUI_LAUNCHER)
-    _sp.Popen(
-        COMFYUI_LAUNCHER,
-        cwd=os.path.dirname(COMFYUI_LAUNCHER),
-        creationflags=_sp.CREATE_NEW_PROCESS_GROUP,
-    )
+    kwargs = {"cwd": os.path.dirname(COMFYUI_LAUNCHER)}
+    if os.name == "nt":
+        kwargs["creationflags"] = _sp.CREATE_NEW_PROCESS_GROUP
+    _sp.Popen(COMFYUI_LAUNCHER, **kwargs)
     # Poll until the API responds
     client = ComfyUIClient()
     deadline = time.time() + COMFYUI_STARTUP_TIMEOUT
@@ -130,19 +130,18 @@ def preflight(client: ComfyUIClient, log):
     else:
         log.info("ComfyUI is running.")
 
-    # Check Ollama model
+    # Check LLM backend + model
     try:
-        import ollama as _ollama
-        models = _ollama.list()
-        model_names = [m.model for m in models.models]
-        found = any(OLLAMA_MODEL in name for name in model_names)
-        if not found:
-            raise RuntimeError(f"Ollama model '{OLLAMA_MODEL}' not found. Run: ollama pull {OLLAMA_MODEL}")
-        log.info("Ollama model '%s' is available.", OLLAMA_MODEL)
+        resolved_model = ensure_model_available(OLLAMA_MODEL)
+        if resolved_model != OLLAMA_MODEL:
+            log.info("%s reachable. Using model '%s' (requested '%s').",
+                     provider_label(), resolved_model, OLLAMA_MODEL)
+        else:
+            log.info("%s model '%s' is available.", provider_label(), resolved_model)
     except RuntimeError:
         raise
     except Exception as e:
-        raise RuntimeError(f"Cannot connect to Ollama: {e}")
+        raise RuntimeError(f"Cannot connect to {provider_label()}: {e}")
 
     # Check workflow template
     try:
@@ -175,6 +174,11 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
     """Full autonomous pipeline."""
     state = load_state(project_name)
     if state:
+        state.setdefault("project_name", project_name)
+        state.setdefault("brief", brief)
+        state.setdefault("scenes", [])
+        state.setdefault("total_scenes", len(state.get("scenes", [])))
+        state.setdefault("is_script", is_script)
         log.info("Resuming project '%s' (%d scenes planned)", project_name, state["total_scenes"])
     else:
         state = create_state(project_name, brief)
@@ -218,7 +222,7 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
         done = sum(1 for s in scenes if s.get("takes_done"))
         log.info("Resuming: %d/%d scenes have takes.", done, len(scenes))
 
-    project_dir = os.path.join(os.path.dirname(__file__), "output", project_name)
+    project_root = config.project_dir(project_name)
     characters = state.get("characters", {})
 
     # Restore character + voice + style descriptions into director module (needed for prompt writing on resume)
@@ -254,7 +258,7 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
             log.info("  Shot: %s | Mood: %s", scene.get("shot_type", "?"), scene.get("mood", "?"))
 
             candidates = generate_keyframes(
-                client, scene, characters, project_dir, brief=brief
+                client, scene, characters, project_root, brief=brief
             )
             scene["keyframe_candidates"] = candidates
             scene.pop("rejection_notes", None)  # Clear rejection after regen
@@ -303,7 +307,7 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
         log.info("  No i2v_template.json found — using text-to-video for all scenes")
     log.info("=" * 60)
 
-    scenes_dir = os.path.join(project_dir, "scenes")
+    scenes_dir = os.path.join(project_root, "scenes")
     os.makedirs(scenes_dir, exist_ok=True)
 
     import shutil
@@ -402,7 +406,7 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
                 log.info("  Scene %d: auto-selected take %d", scene["scene_number"], takes[0]["take"])
 
         if scene_paths:
-            final_dir = os.path.join(os.path.dirname(__file__), "output", project_name)
+            final_dir = config.project_dir(project_name)
             final_path = os.path.join(final_dir, "final.mp4")
             assembler.concat_scenes(scene_paths, final_path)
             state["final_path"] = final_path

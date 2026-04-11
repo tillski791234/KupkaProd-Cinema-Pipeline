@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}KupkaProd Web{% endblock %}
+
+{% block content %}
+<section class="dashboard-grid">
+  <div class="panel panel-form">
+    <div class="panel-head">
+      <h1>Start Production</h1>
+      <p>Run the existing movie pipeline without forwarding the Tk desktop.</p>
+    </div>
+
+    <form action="/projects/start" method="post" class="stack-form">
+      <label>
+        <span>Project name</span>
+        <input class="form-control" type="text" name="project_name" placeholder="optional, auto-generated from prompt">
+      </label>
+
+      <label>
+        <span>Movie brief or script</span>
+        <textarea class="form-control" name="brief" rows="9" placeholder="Describe the film or paste a screenplay. Leave empty to resume an existing project by name."></textarea>
+      </label>
+
+      <div class="inline-toggles">
+        <label><input type="checkbox" name="is_script" value="1"> Treat input as screenplay</label>
+        <label><input type="checkbox" name="lazy" value="1"> Lazy mode</label>
+        <label><input type="checkbox" name="t2v_only" value="1"> T2V only</label>
+        <label><input type="checkbox" name="skip_kf_eval" value="1" {% if runtime_defaults.skip_kf_eval %}checked{% endif %}> Skip keyframe eval</label>
+        <label><input type="checkbox" name="subtitle_safe" value="1" {% if runtime_defaults.subtitle_safe %}checked{% endif %}> Subtitle safe mode</label>
+      </div>
+
+      <details class="subpanel" open>
+        <summary>Pipeline settings</summary>
+        <div class="form-grid">
+          <label>
+            <span>Takes per scene</span>
+            <input class="form-control" type="number" min="1" max="10" name="takes" value="{{ runtime_defaults.takes }}">
+          </label>
+          <label>
+            <span>Scene min (sec)</span>
+            <input class="form-control" type="number" min="1" max="120" name="scene_min" value="{{ runtime_defaults.scene_min }}">
+          </label>
+          <label>
+            <span>Scene max (sec)</span>
+            <input class="form-control" type="number" min="2" max="120" name="scene_max" value="{{ runtime_defaults.scene_max }}">
+          </label>
+          <label>
+            <span>Keyframe width</span>
+            <input class="form-control" type="number" min="512" step="64" name="kf_width" value="{{ runtime_defaults.kf_width }}">
+          </label>
+          <label>
+            <span>Keyframe height</span>
+            <input class="form-control" type="number" min="512" step="64" name="kf_height" value="{{ runtime_defaults.kf_height }}">
+          </label>
+          <label>
+            <span>Video width</span>
+            <input class="form-control" type="number" min="256" step="32" name="video_width" value="{{ runtime_defaults.video_width }}">
+          </label>
+          <label>
+            <span>Video height</span>
+            <input class="form-control" type="number" min="256" step="32" name="video_height" value="{{ runtime_defaults.video_height }}">
+          </label>
+        </div>
+      </details>
+
+      <details class="subpanel">
+        <summary>Server settings</summary>
+        <div class="form-grid">
+          <label>
+            <span>ComfyUI root</span>
+            <input class="form-control" type="text" name="comfyui_root" value="{{ settings.comfyui_root }}">
+          </label>
+          <label>
+            <span>Project output root</span>
+            <input class="form-control" type="text" name="project_output_root" value="{{ settings.project_output_root }}">
+          </label>
+          <label>
+            <span>ComfyUI launcher</span>
+            <input class="form-control" type="text" name="comfyui_launcher" value="{{ settings.comfyui_launcher }}">
+          </label>
+          <label>
+            <span>LLM provider</span>
+            <select class="form-control" name="llm_provider">
+              <option value="ollama" {% if settings.llm_provider == 'ollama' %}selected{% endif %}>ollama</option>
+              <option value="openai_compatible" {% if settings.llm_provider == 'openai_compatible' %}selected{% endif %}>openai_compatible</option>
+            </select>
+          </label>
+          <label>
+            <span>LLM API base URL</span>
+            <input class="form-control" type="text" name="llm_base_url" value="{{ settings.llm_base_url }}">
+          </label>
+          <label>
+            <span>LLM model</span>
+            <input class="form-control" type="text" name="llm_model" value="{{ settings.llm_model }}">
+          </label>
+        </div>
+      </details>
+
+      <div class="button-row">
+        <button class="btn btn-outline-secondary" type="submit" formaction="/settings/save">Save settings only</button>
+        <button class="btn btn-primary" type="submit">Launch or Resume</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="panel panel-projects">
+    <div class="panel-head">
+      <h2>Projects</h2>
+      <p>Saved productions and anything currently running in this web session.</p>
+    </div>
+
+    {% if projects %}
+      <div class="project-list">
+        {% for project in projects %}
+          <a class="project-card" href="/projects/{{ project.name }}">
+            <div class="project-card-top">
+              <strong>{{ project.name }}</strong>
+              <span class="status-pill {% if project.job.running %}running{% endif %}">{{ project.phase }}</span>
+            </div>
+            <div class="project-metrics">
+              <span>{{ project.total_scenes }} scenes</span>
+              <span>{{ project.keyframes_done }} keyframes approved</span>
+              <span>{{ project.takes_done }} takes selected</span>
+            </div>
+            {% if project.final_url %}
+              <span class="link-line">Final film ready</span>
+            {% endif %}
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty-state">No projects yet. Start with a short brief or resume by project name.</div>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

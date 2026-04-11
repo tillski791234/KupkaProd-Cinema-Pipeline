@@ -15,18 +15,30 @@ from tkinter import ttk, scrolledtext, messagebox
 from PIL import Image, ImageTk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import project_state_path
 
 
 def load_state(project_name: str) -> dict:
-    path = os.path.join(os.path.dirname(__file__), "output", project_name, "state.json")
+    path = project_state_path(project_name)
     with open(path) as f:
         return json.load(f)
 
 
 def save_state(state: dict):
-    path = os.path.join(os.path.dirname(__file__), "output", state["project_name"], "state.json")
+    path = project_state_path(state["project_name"])
     with open(path, "w") as f:
         json.dump(state, f, indent=2)
+
+
+def open_with_system_default(path: str):
+    """Open a file in the system default app across platforms."""
+    if os.name == "nt":
+        os.startfile(path)
+        return
+
+    import subprocess
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen([opener, path])
 
 
 class StoryboardGUI:
@@ -177,7 +189,7 @@ class StoryboardGUI:
                        command=lambda p=cand_path, sn=scene_num: self._select(sn, p)
                        ).pack(side=tk.LEFT, padx=2)
             ttk.Button(btn_f, text="Full Size",
-                       command=lambda p=cand_path: os.startfile(p)
+                       command=lambda p=cand_path: open_with_system_default(p)
                        ).pack(side=tk.LEFT, padx=2)
 
         # Nav state

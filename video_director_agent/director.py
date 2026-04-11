@@ -2,9 +2,10 @@
 
 import json
 import logging
-import ollama
+import re
 
-from config import OLLAMA_MODEL_CREATIVE, SCENE_MIN_SEC, SCENE_MAX_SEC, SCENE_SWEET_SPOT_SEC
+from config import OLLAMA_MODEL_CREATIVE, SCENE_MIN_SEC, SCENE_MAX_SEC, SCENE_SWEET_SPOT_SEC, SUBTITLE_SAFE_MODE
+from llm_client import chat as llm_chat
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +164,60 @@ FORMAT:
 - Present tense, one continuous moment
 - No quality tags ("masterpiece", "8k", "cinematic")
 - 300-500 words — be EXHAUSTIVELY descriptive
+- Respond with ONLY the prompt text"""
+
+PROMPT_WRITER_SYSTEM_SAFE = """You write prompts for LTX Video 2.3, an AI that generates VIDEO WITH SYNCHRONIZED AUDIO from a single text prompt.
+
+EACH PROMPT IS COMPLETELY INDEPENDENT. The video model has ZERO memory between scenes. It has never seen any other prompt. Every single prompt must rebuild the ENTIRE WORLD from scratch — the character, the setting, the lighting, the props, everything.
+
+WORLD RECONSTRUCTION — EVERY PROMPT MUST CONTAIN ALL OF THIS:
+
+1. CHARACTER:
+   - Full physical description every time
+   - Clothing, facial features, body language, age impression, posture
+
+2. SETTING:
+   - Full environment description every time
+   - Background objects, surfaces, props, depth, atmosphere
+
+3. LIGHTING:
+   - Light direction, quality, temperature, contrast, shadows
+
+4. CAMERA:
+   - Shot type, framing, movement, angle, lens impression
+
+5. SPEECH AND AUDIO:
+   - If the scene includes dialogue, describe it as NATURAL SPOKEN AUDIO only
+   - Describe who is speaking, how they sound, emotional delivery, pacing, and the topic or intent of what they say
+   - DO NOT include literal quoted dialogue unless absolutely necessary
+   - Keep the spoken language exactly the same as the source dialogue or user brief
+   - NEVER translate non-English speech into English
+   - NEVER ask for visible words, subtitles, captions, lower thirds, lyric text, speech bubbles, or on-screen typography
+   - The words should be heard as speech, not shown as text
+
+6. VOICE/SPEECH:
+   - Include pitch, timbre, accent, cadence, and delivery when characters speak
+
+7. AUDIO/SOUND:
+   - Ambient sounds and sound effects are welcome
+   - Do NOT request background music
+
+8. VISUAL STYLE:
+   - Apply the style lock consistently across characters, environment, and grading
+
+CRITICAL ANTI-CAPTION RULE:
+- The frame must contain NO readable text
+- No subtitles
+- No captions
+- No words on screen
+- No typography overlays
+- No lower thirds
+- No burned-in dialogue text
+
+FORMAT:
+- Present tense, one continuous moment
+- No quality tags
+- 300-500 words
 - Respond with ONLY the prompt text"""
 
 
@@ -326,7 +381,7 @@ def _chat_with_auto_tokens(model: str, messages: list, base_options: dict,
         opts = {**base_options, "num_predict": num_predict, "num_ctx": max(num_predict, 32768)}
         log.info("  LLM call: %s, num_predict=%d", model, num_predict)
 
-        response = ollama.chat(model=model, messages=messages, options=opts)
+        response = llm_chat(model=model, messages=messages, options=opts)
         raw = response["message"]["content"].strip()
 
         if not raw:
@@ -553,6 +608,52 @@ def get_style_anchor() -> str:
     return _current_style
 
 
+def _dialogue_intent(dialogue: str, max_words: int = 28) -> str:
+    """Compress literal dialogue into a short spoken-content intent summary."""
+    if not dialogue:
+        return ""
+    clean = re.sub(r'\s+', ' ', dialogue).strip()
+    clean = clean.replace('"', '').replace("'", "")
+    words = clean.split()
+    if len(words) <= max_words:
+        return clean
+    return " ".join(words[:max_words]) + " ..."
+
+
+def _dialogue_anchor_excerpt(dialogue: str, max_words: int = 12) -> str:
+    """Keep a short verbatim excerpt as a language anchor without pasting full dialogue."""
+    if not dialogue:
+        return ""
+    clean = re.sub(r"\s+", " ", dialogue).strip()
+    words = clean.split()
+    excerpt = " ".join(words[:max_words])
+    if len(words) > max_words:
+        excerpt += " ..."
+    return excerpt
+
+
+def _infer_spoken_language(dialogue: str, brief: str = "") -> str:
+    """Best-effort spoken language hint for subtitle-safe mode."""
+    text = f"{dialogue} {brief}".lower()
+    if not text.strip():
+        return "the original language requested by the user"
+
+    language_markers = [
+        ("German", [" der ", " die ", " das ", " und ", " nicht ", " ist ", " auf deutsch", " deutsch", "guten", "danke"]),
+        ("English", [" the ", " and ", " is ", " are ", " with ", " in english", " english "]),
+        ("French", [" le ", " la ", " les ", " est ", " avec ", " bonjour", " merci", " en francais", " en français", " français"]),
+        ("Spanish", [" el ", " la ", " los ", " las ", " que ", " gracias", " hola", " en espanol", " en español", " español"]),
+        ("Italian", [" il ", " lo ", " gli ", " che ", " grazie", " ciao", " in italiano", " italiano "]),
+        ("Portuguese", [" nao ", " não ", " obrigado", " olá", " voce ", " você ", " em portugues", " em português", " português"]),
+    ]
+
+    padded = f" {text} "
+    for language, markers in language_markers:
+        if any(marker in padded for marker in markers):
+            return language
+    return "the original language used in the source dialogue"
+
+
 def _sanitize_scene(s: dict) -> dict:
     """Coerce scene fields to correct types. LLMs sometimes output numbers as strings."""
     # Integer fields
@@ -772,7 +873,7 @@ def _parse_json(raw: str, retries: int = 2, brief: str = "") -> list[dict]:
         else:
             log.warning("JSON parse failed: %s", e)
         log.info("Retrying Gemma call...")
-        response = ollama.chat(
+        response = llm_chat(
             model=OLLAMA_MODEL_CREATIVE,
             messages=[
                 {"role": "system", "content": BREAKDOWN_SYSTEM},
@@ -864,7 +965,25 @@ def write_prompt(scene: dict, prev_scene: dict = None, brief: str = "") -> str:
 
     # DIALOGUE — exact words
     dialogue = scene.get("dialogue", "")
-    if dialogue:
+    if dialogue and SUBTITLE_SAFE_MODE:
+        intent = _dialogue_intent(dialogue)
+        language = _infer_spoken_language(dialogue, brief)
+        anchor_excerpt = _dialogue_anchor_excerpt(dialogue)
+        context += "SPOKEN CONTENT (subtitle-safe mode):\n"
+        context += (
+            f"  The character speaks naturally in {language}, in their own voice, about this content: {intent}\n"
+            "  Keep the speech audible and emotionally appropriate.\n"
+            "  Preserve the original spoken language from the source dialogue exactly. Do NOT translate, anglicize, or switch languages.\n"
+        )
+        if anchor_excerpt:
+            context += (
+                f"  Language anchor excerpt from the source dialogue: {anchor_excerpt}\n"
+                "  Use this only to preserve spoken language and phrasing flavor. The words must be heard as speech, not shown as readable text.\n"
+            )
+        context += (
+            "  DO NOT show any readable words, captions, subtitles, or on-screen text.\n\n"
+        )
+    elif dialogue:
         context += f"DIALOGUE (include these EXACT words in quotes — do NOT summarize or shorten):\n{dialogue}\n\n"
     else:
         context += "DIALOGUE: None — this is a visual/ambient scene.\n\n"
@@ -883,13 +1002,17 @@ def write_prompt(scene: dict, prev_scene: dict = None, brief: str = "") -> str:
 - Include the FULL setting — never write "same room" or "same stage"
 - Include the visual style anchor — weave the style description into the scene naturally
 - Include voice characteristics when characters speak
-- Embed all dialogue word-for-word in quotes within the action
 - 300-500 words. Be EXHAUSTIVELY descriptive. Lazy/short prompts make bad video."""
 
-    response = ollama.chat(
+    if SUBTITLE_SAFE_MODE:
+        context += "\n- Do NOT render readable text, captions, subtitles, lower thirds, or typography overlays anywhere in the frame."
+    else:
+        context += "\n- Embed all dialogue word-for-word in quotes within the action"
+
+    response = llm_chat(
         model=OLLAMA_MODEL_CREATIVE,
         messages=[
-            {"role": "system", "content": PROMPT_WRITER_SYSTEM},
+            {"role": "system", "content": PROMPT_WRITER_SYSTEM_SAFE if SUBTITLE_SAFE_MODE else PROMPT_WRITER_SYSTEM},
             {"role": "user", "content": context},
         ],
         options={
@@ -922,10 +1045,18 @@ Attempt number: {attempt} of 3
 Write a NEW LTX 2.3 prompt for this scene that addresses the failure.
 Respond with ONLY the new prompt text."""
 
-    response = ollama.chat(
+    if SUBTITLE_SAFE_MODE and scene.get("dialogue"):
+        language = _infer_spoken_language(scene.get("dialogue", ""))
+        anchor_excerpt = _dialogue_anchor_excerpt(scene.get("dialogue", ""))
+        context += f"\n\nKeep any spoken dialogue in {language}. Do NOT translate or switch languages."
+        if anchor_excerpt:
+            context += f"\nLanguage anchor excerpt: {anchor_excerpt}"
+        context += "\nDo not render captions, subtitles, or readable on-screen text."
+
+    response = llm_chat(
         model=OLLAMA_MODEL_CREATIVE,
         messages=[
-            {"role": "system", "content": PROMPT_WRITER_SYSTEM},
+            {"role": "system", "content": PROMPT_WRITER_SYSTEM_SAFE if SUBTITLE_SAFE_MODE else PROMPT_WRITER_SYSTEM},
             {"role": "user", "content": context},
         ],
         options={"temperature": 0.5 + (attempt * 0.1)},  # Increase creativity on later retries

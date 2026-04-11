@@ -4,9 +4,9 @@ import base64
 import json
 import logging
 import cv2
-import ollama
 
 from config import OLLAMA_MODEL_FAST, EVAL_FRAME_SAMPLE_RATE, EVAL_MAX_FRAMES
+from llm_client import chat as llm_chat
 
 log = logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ Respond with valid JSON:
 "retry_suggestion": "specific changes to make in the prompt to fix the issue, or null if PASS"}}"""
 
     log.info("Evaluating scene %d (%d frames, strict mode)...", scene["scene_number"], len(frames))
-    response = ollama.chat(
+    response = llm_chat(
         model=OLLAMA_MODEL_FAST,
         messages=[{"role": "user", "content": eval_prompt, "images": frames}],
         options={

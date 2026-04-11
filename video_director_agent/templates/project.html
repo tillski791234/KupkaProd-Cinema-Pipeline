@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+{% block title %}{{ project_name }} · KupkaProd{% endblock %}
+
+{% block content %}
+<section class="project-hero">
+  <div>
+    <a class="subtle-link" href="/">Back to dashboard</a>
+    <h1>{{ project_name }}</h1>
+    <p class="phase-line">
+      <span id="phase-label" class="status-pill {% if job.running %}running{% endif %}">{{ phase }}</span>
+      <span id="scene-metrics">{{ state.scenes|length if state.scenes else 0 }} scenes</span>
+    </p>
+  </div>
+
+  <div class="button-row">
+    <form action="/projects/start" method="post" class="inline-form">
+      <input type="hidden" name="project_name" value="{{ project_name }}">
+      <input type="hidden" name="skip_kf_eval" value="{% if project_runtime.skip_kf_eval %}1{% endif %}">
+      <input type="hidden" name="takes" value="{{ project_runtime.takes }}">
+      <input type="hidden" name="scene_min" value="{{ project_runtime.scene_min }}">
+      <input type="hidden" name="scene_max" value="{{ project_runtime.scene_max }}">
+      <input type="hidden" name="subtitle_safe" value="{% if project_runtime.subtitle_safe %}1{% endif %}">
+      <input type="hidden" name="kf_width" value="{{ project_runtime.kf_width }}">
+      <input type="hidden" name="kf_height" value="{{ project_runtime.kf_height }}">
+      <input type="hidden" name="video_width" value="{{ project_runtime.video_width }}">
+      <input type="hidden" name="video_height" value="{{ project_runtime.video_height }}">
+      <input type="hidden" name="comfyui_root" value="{{ settings.comfyui_root }}">
+      <input type="hidden" name="comfyui_launcher" value="{{ settings.comfyui_launcher }}">
+      <input type="hidden" name="llm_provider" value="{{ settings.llm_provider }}">
+      <input type="hidden" name="llm_base_url" value="{{ settings.llm_base_url }}">
+      <input type="hidden" name="llm_model" value="{{ settings.llm_model }}">
+      <button class="btn btn-primary" type="submit" {% if job.running %}disabled{% endif %}>Resume Production</button>
+    </form>
+  </div>
+</section>
+
+<section class="project-layout">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Live Log</h2>
+      <p>Browser polling updates this panel while the background worker runs.</p>
+    </div>
+    <pre id="live-log" class="log-box">{{ logs }}</pre>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Project Snapshot</h2>
+      <p>Current persisted state from the existing `state.json` project file.</p>
+    </div>
+    <div class="meta-grid">
+      <div><span>Total scenes</span><strong id="total-scenes">{{ state.scenes|length if state.scenes else 0 }}</strong></div>
+      <div><span>Keyframes approved</span><strong id="keyframe-count">{{ approved_keyframes }}</strong></div>
+      <div><span>Takes selected</span><strong id="take-count">{{ selected_takes }}</strong></div>
+      <div><span>Storyboard approved</span><strong id="storyboard-state">{{ "yes" if state.storyboard_approved else "no" }}</strong></div>
+      <div><span>Generation complete</span><strong id="generation-state">{{ "yes" if state.generation_completed_at else "no" }}</strong></div>
+      <div><span>Final film</span><strong id="final-state">{{ "ready" if final_url else "pending" }}</strong></div>
+    </div>
+
+    {% if final_url %}
+      <div class="media-block">
+        <video controls preload="metadata" src="{{ final_url }}"></video>
+        <a class="subtle-link" href="{{ final_url }}" target="_blank">Open final film</a>
+      </div>
+    {% endif %}
+  </div>
+</section>
+
+{% if storyboard_ready %}
+<section class="panel section-panel">
+  <div class="panel-head">
+    <h2>Storyboard Review</h2>
+    <p>Select approved keyframes or mark scenes for regeneration before resuming production.</p>
+  </div>
+
+  {% for entry in storyboard_scenes %}
+    {% set scene = entry.scene %}
+    {% if entry.candidates %}
+      <article class="scene-card">
+        <div class="scene-copy">
+          <h3>Scene {{ scene.scene_number }} · {{ scene.shot_type or "shot" }}</h3>
+          <p>{{ scene.description }}</p>
+          {% if scene.dialogue %}
+            <p class="muted">Dialogue: {{ scene.dialogue[:300] }}</p>
+          {% endif %}
+        </div>
+
+        <div class="candidate-grid">
+          {% for candidate in entry.candidates %}
+            <div class="candidate-card {% if candidate.selected %}selected{% endif %}">
+              {% if candidate.url %}
+                <img src="{{ candidate.url }}" alt="Scene {{ scene.scene_number }} keyframe {{ candidate.candidate }}">
+              {% endif %}
+              <div class="candidate-meta">
+                <strong>Candidate {{ candidate.candidate }}</strong>
+                <span>{{ candidate.eval.verdict if candidate.eval else candidate.status }}</span>
+              </div>
+              <form action="/projects/{{ project_name }}/storyboard/select" method="post">
+                <input type="hidden" name="scene_number" value="{{ scene.scene_number }}">
+                <input type="hidden" name="candidate_path" value="{{ candidate.path }}">
+                <button class="btn btn-outline-secondary btn-sm" type="submit">{% if candidate.selected %}Selected{% else %}Select keyframe{% endif %}</button>
+              </form>
+            </div>
+          {% endfor %}
+        </div>
+
+        <form class="reject-form" action="/projects/{{ project_name }}/storyboard/reject" method="post">
+          <input type="hidden" name="scene_number" value="{{ scene.scene_number }}">
+          <textarea class="form-control" name="rejection_notes" rows="3" placeholder="Optional notes for why the scene should regenerate"></textarea>
+          <button class="btn btn-outline-secondary" type="submit">Regenerate scene keyframes</button>
+        </form>
+      </article>
+    {% endif %}
+  {% endfor %}
+
+  <form action="/projects/{{ project_name }}/storyboard/proceed" method="post" class="inline-form">
+    <button class="btn btn-primary" type="submit">Mark storyboard approved</button>
+  </form>
+</section>
+{% endif %}
+
+{% if take_review_ready %}
+<section class="panel section-panel">
+  <div class="panel-head">
+    <h2>Take Review</h2>
+    <p>Choose one generated take per scene, then assemble the final film.</p>
+  </div>
+
+  {% for entry in take_scenes %}
+    {% set scene = entry.scene %}
+    {% if entry.takes %}
+      <article class="scene-card">
+        <div class="scene-copy">
+          <h3>Scene {{ scene.scene_number }} · {{ scene.shot_type or "shot" }}</h3>
+          <p>{{ scene.description }}</p>
+        </div>
+
+        <div class="candidate-grid">
+          {% for take in entry.takes %}
+            <div class="candidate-card {% if take.selected %}selected{% endif %}">
+              {% if take.url %}
+                <video controls preload="metadata" src="{{ take.url }}"></video>
+              {% endif %}
+              <div class="candidate-meta">
+                <strong>Take {{ take.take }}</strong>
+                <span>Seed {{ take.seed }}</span>
+              </div>
+              <form action="/projects/{{ project_name }}/takes/select" method="post">
+                <input type="hidden" name="scene_number" value="{{ scene.scene_number }}">
+                <input type="hidden" name="take_path" value="{{ take.path }}">
+                <button class="btn btn-outline-secondary btn-sm" type="submit">{% if take.selected %}Selected{% else %}Select take{% endif %}</button>
+              </form>
+            </div>
+          {% endfor %}
+        </div>
+
+        <form class="redo-takes-form" action="/projects/{{ project_name }}/takes/regenerate" method="post">
+          <input type="hidden" name="scene_number" value="{{ scene.scene_number }}">
+          <label>
+            <span>New takes</span>
+            <input class="form-control" type="number" min="1" max="10" name="redo_count" value="3">
+          </label>
+          <label class="checkbox-inline">
+            <input type="checkbox" name="clear_old" value="1" checked>
+            <span>Replace old takes</span>
+          </label>
+          <button class="btn btn-outline-secondary" type="submit" {% if job.running %}disabled{% endif %}>Regenerate takes for scene {{ scene.scene_number }}</button>
+        </form>
+      </article>
+    {% endif %}
+  {% endfor %}
+
+  <form action="/projects/{{ project_name }}/assemble" method="post" class="inline-form">
+    <button class="btn btn-primary" type="submit">Assemble final film</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (() => {
+    const logBox = document.getElementById("live-log");
+    const phaseLabel = document.getElementById("phase-label");
+    const totalScenes = document.getElementById("total-scenes");
+    const keyframeCount = document.getElementById("keyframe-count");
+    const takeCount = document.getElementById("take-count");
+    const sceneMetrics = document.getElementById("scene-metrics");
+    const storyboardState = document.getElementById("storyboard-state");
+    const generationState = document.getElementById("generation-state");
+    const finalState = document.getElementById("final-state");
+    let wasRunning = {{ "true" if job.running else "false" }};
+
+    async function refreshProject() {
+      const response = await fetch(`/projects/{{ project_name }}/api`, { cache: "no-store" });
+      if (!response.ok) {
+        return;
+      }
+      const data = await response.json();
+      phaseLabel.textContent = data.phase;
+      phaseLabel.classList.toggle("running", Boolean(data.running));
+      totalScenes.textContent = data.total_scenes;
+      if (keyframeCount) keyframeCount.textContent = data.approved_keyframes;
+      if (takeCount) takeCount.textContent = data.selected_takes;
+      sceneMetrics.textContent = `${data.total_scenes} scenes`;
+      storyboardState.textContent = data.storyboard_approved ? "yes" : "no";
+      generationState.textContent = data.generation_completed ? "yes" : "no";
+      finalState.textContent = data.final_url ? "ready" : "pending";
+      logBox.textContent = data.logs || "";
+      logBox.scrollTop = logBox.scrollHeight;
+
+      if (wasRunning && !data.running) {
+        window.location.reload();
+      }
+      wasRunning = Boolean(data.running);
+    }
+
+    refreshProject();
+    setInterval(refreshProject, 2500);
+  })();
+</script>
+{% endblock %}

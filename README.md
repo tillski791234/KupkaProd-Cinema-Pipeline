@@ -194,6 +194,25 @@ On first launch, a setup dialog asks for:
 
 These settings are saved and can be changed anytime via the Settings button.
 
+### Optional: Launch the Web Interface
+
+If you prefer using the pipeline through a browser instead of the Tk desktop UI, install the extra web dependencies from `requirements.txt` and run:
+
+```bash
+uvicorn video_director_agent.web_app:app --host 0.0.0.0 --port 8000
+```
+
+Then open `http://localhost:8000` in your browser, or forward that port over SSH if the pipeline runs on another machine.
+
+Current scope of the web UI:
+- Start or resume a production run
+- Watch live logs in the browser
+- Review storyboard keyframes
+- Review generated takes and assemble the final film
+
+Current limitation:
+- The first web version supports only one active production job at a time
+
 ### Step 8: Make a Movie
 
 Type a prompt like *"make a 2 minute nature documentary about ocean life"* and click **Start Production**.
