@@ -375,6 +375,7 @@ def _sync_runtime_modules():
     director_mod.OLLAMA_MODEL_CREATIVE = config.OLLAMA_MODEL_CREATIVE
     director_mod.SUBTITLE_SAFE_MODE = config.SUBTITLE_SAFE_MODE
     evaluator_mod.OLLAMA_MODEL_FAST = config.OLLAMA_MODEL_FAST
+    keyframe_mod.OLLAMA_MODEL_CREATIVE = config.OLLAMA_MODEL_CREATIVE
     keyframe_mod.OLLAMA_MODEL_FAST = config.OLLAMA_MODEL_FAST
     keyframe_mod.COMFYUI_OUTPUT_DIR = config.COMFYUI_OUTPUT_DIR
     keyframe_mod.KF_WIDTH = config.KF_WIDTH
@@ -566,8 +567,8 @@ def _save_settings_from_form(form):
         "llm_provider": form.get("llm_provider", _get("llm_provider")),
         "llm_base_url": form.get("llm_base_url", _get("llm_base_url")),
         "ollama_host": form.get("llm_base_url", _get("llm_base_url")),
-        "ollama_model_creative": form.get("llm_model", _get("ollama_model_fast")),
-        "ollama_model_fast": form.get("llm_model", _get("ollama_model_fast")),
+        "ollama_model_creative": form.get("llm_model_creative", _get("ollama_model_creative")),
+        "ollama_model_fast": form.get("llm_model_fast", _get("ollama_model_fast")),
         "kf_width": _int_from_form(form, "kf_width", int(_get("kf_width"))),
         "kf_height": _int_from_form(form, "kf_height", int(_get("kf_height"))),
         "video_width": _int_from_form(form, "video_width", int(_get("video_width"))),
@@ -587,7 +588,8 @@ def _base_template_context(request: Request) -> dict[str, Any]:
             "comfyui_launcher": settings["comfyui_launcher"],
             "llm_provider": settings["llm_provider"],
             "llm_base_url": settings["llm_base_url"],
-            "llm_model": settings["ollama_model_fast"],
+            "llm_model_creative": settings["ollama_model_creative"],
+            "llm_model_fast": settings["ollama_model_fast"],
         },
         "runtime_defaults": _current_pipeline_defaults(),
     }

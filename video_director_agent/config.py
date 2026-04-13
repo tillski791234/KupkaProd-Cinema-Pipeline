@@ -129,7 +129,7 @@ def load_runtime_settings() -> dict:
     LLM_BASE_URL = _get("llm_base_url")
     LLM_API_KEY = _get("llm_api_key")
     OLLAMA_HOST = _get("ollama_host")
-    OLLAMA_MODEL_CREATIVE = _get("ollama_model_fast")
+    OLLAMA_MODEL_CREATIVE = _get("ollama_model_creative")
     OLLAMA_MODEL_FAST = _get("ollama_model_fast")
     OLLAMA_MODEL = OLLAMA_MODEL_FAST
 

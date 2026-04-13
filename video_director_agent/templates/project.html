@@ -28,7 +28,8 @@
       <input type="hidden" name="comfyui_launcher" value="{{ settings.comfyui_launcher }}">
       <input type="hidden" name="llm_provider" value="{{ settings.llm_provider }}">
       <input type="hidden" name="llm_base_url" value="{{ settings.llm_base_url }}">
-      <input type="hidden" name="llm_model" value="{{ settings.llm_model }}">
+      <input type="hidden" name="llm_model_creative" value="{{ settings.llm_model_creative }}">
+      <input type="hidden" name="llm_model_fast" value="{{ settings.llm_model_fast }}">
       <button class="btn btn-primary" type="submit" {% if job.running %}disabled{% endif %}>Resume Production</button>
     </form>
   </div>
@@ -89,22 +90,29 @@
           {% for candidate in entry.candidates %}
             <div class="candidate-card {% if candidate.selected %}selected{% endif %}">
               {% if candidate.url %}
-                <img src="{{ candidate.url }}" alt="Scene {{ scene.scene_number }} keyframe {{ candidate.candidate }}">
+                <img class="storyboard-thumb" src="{{ candidate.url }}" alt="Scene {{ scene.scene_number }} keyframe {{ candidate.candidate }}">
               {% endif %}
               <div class="candidate-meta">
                 <strong>Candidate {{ candidate.candidate }}</strong>
                 <span>{{ candidate.eval.verdict if candidate.eval else candidate.status }}</span>
               </div>
-              <form action="/projects/{{ project_name }}/storyboard/select" method="post">
+              <form action="/projects/{{ project_name }}/storyboard/select" method="post" class="selection-form js-preserve-scroll">
                 <input type="hidden" name="scene_number" value="{{ scene.scene_number }}">
                 <input type="hidden" name="candidate_path" value="{{ candidate.path }}">
-                <button class="btn btn-outline-secondary btn-sm" type="submit">{% if candidate.selected %}Selected{% else %}Select keyframe{% endif %}</button>
+                <label class="selection-toggle {% if candidate.selected %}is-selected{% endif %}">
+                  <input
+                    type="checkbox"
+                    {% if candidate.selected %}checked disabled{% endif %}
+                    onchange="if (this.checked) { this.form.requestSubmit(); }"
+                  >
+                  <span>{% if candidate.selected %}Selected{% else %}Use for I2V{% endif %}</span>
+                </label>
               </form>
             </div>
           {% endfor %}
         </div>
 
-        <form class="reject-form" action="/projects/{{ project_name }}/storyboard/reject" method="post">
+        <form class="reject-form js-preserve-scroll" action="/projects/{{ project_name }}/storyboard/reject" method="post">
           <input type="hidden" name="scene_number" value="{{ scene.scene_number }}">
           <textarea class="form-control" name="rejection_notes" rows="3" placeholder="Optional notes for why the scene should regenerate"></textarea>
           <button class="btn btn-outline-secondary" type="submit">Regenerate scene keyframes</button>
@@ -145,16 +153,23 @@
                 <strong>Take {{ take.take }}</strong>
                 <span>Seed {{ take.seed }}</span>
               </div>
-              <form action="/projects/{{ project_name }}/takes/select" method="post">
+              <form action="/projects/{{ project_name }}/takes/select" method="post" class="selection-form js-preserve-scroll">
                 <input type="hidden" name="scene_number" value="{{ scene.scene_number }}">
                 <input type="hidden" name="take_path" value="{{ take.path }}">
-                <button class="btn btn-outline-secondary btn-sm" type="submit">{% if take.selected %}Selected{% else %}Select take{% endif %}</button>
+                <label class="selection-toggle {% if take.selected %}is-selected{% endif %}">
+                  <input
+                    type="checkbox"
+                    {% if take.selected %}checked disabled{% endif %}
+                    onchange="if (this.checked) { this.form.requestSubmit(); }"
+                  >
+                  <span>{% if take.selected %}Selected{% else %}Use take{% endif %}</span>
+                </label>
               </form>
             </div>
           {% endfor %}
         </div>
 
-        <form class="redo-takes-form" action="/projects/{{ project_name }}/takes/regenerate" method="post">
+        <form class="redo-takes-form js-preserve-scroll" action="/projects/{{ project_name }}/takes/regenerate" method="post">
           <input type="hidden" name="scene_number" value="{{ scene.scene_number }}">
           <label>
             <span>New takes</span>
@@ -180,6 +195,7 @@
 {% block scripts %}
 <script>
   (() => {
+    const scrollKey = "kupkaprod-project-scroll:{{ project_name }}";
     const logBox = document.getElementById("live-log");
     const phaseLabel = document.getElementById("phase-label");
     const totalScenes = document.getElementById("total-scenes");
@@ -190,6 +206,32 @@
     const generationState = document.getElementById("generation-state");
     const finalState = document.getElementById("final-state");
     let wasRunning = {{ "true" if job.running else "false" }};
+    let logPinnedToBottom = true;
+
+    function restoreScroll() {
+      const stored = sessionStorage.getItem(scrollKey);
+      if (!stored) return;
+      const y = Number(stored);
+      if (Number.isFinite(y)) {
+        window.scrollTo({ top: y, behavior: "auto" });
+      }
+      sessionStorage.removeItem(scrollKey);
+    }
+
+    function rememberScroll() {
+      sessionStorage.setItem(scrollKey, String(window.scrollY));
+    }
+
+    document.querySelectorAll(".js-preserve-scroll").forEach((form) => {
+      form.addEventListener("submit", rememberScroll);
+    });
+
+    if (logBox) {
+      logBox.addEventListener("scroll", () => {
+        const threshold = 24;
+        logPinnedToBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - threshold;
+      });
+    }
 
     async function refreshProject() {
       const response = await fetch(`/projects/{{ project_name }}/api`, { cache: "no-store" });
@@ -207,14 +249,18 @@
       generationState.textContent = data.generation_completed ? "yes" : "no";
       finalState.textContent = data.final_url ? "ready" : "pending";
       logBox.textContent = data.logs || "";
-      logBox.scrollTop = logBox.scrollHeight;
+      if (logPinnedToBottom) {
+        logBox.scrollTop = logBox.scrollHeight;
+      }
 
       if (wasRunning && !data.running) {
+        rememberScroll();
         window.location.reload();
       }
       wasRunning = Boolean(data.running);
     }
 
+    restoreScroll();
     refreshProject();
     setInterval(refreshProject, 2500);
   })();

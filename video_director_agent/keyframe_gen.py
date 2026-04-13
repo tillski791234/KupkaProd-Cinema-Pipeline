@@ -9,13 +9,26 @@ import base64
 import copy
 
 from config import (
-    COMFYUI_OUTPUT_DIR, OLLAMA_MODEL_FAST,
+    COMFYUI_OUTPUT_DIR, OLLAMA_MODEL_CREATIVE, OLLAMA_MODEL_FAST,
     KF_PROMPT_NODE_ID, KF_SEED_NODE_ID, KF_LATENT_NODE_ID,
     KF_CANDIDATES, KF_WIDTH, KF_HEIGHT, SKIP_KF_EVAL,
 )
 from llm_client import chat as llm_chat
 
 log = logging.getLogger(__name__)
+
+KEYFRAME_PROMPT_SYSTEM = """You write prompts for a single storyboard image for Z-Image Turbo.
+
+Write ONE visual still-frame prompt only. This is not a video prompt and not an audio prompt.
+
+Rules:
+- Describe only what is visible in one frozen cinematic frame
+- Keep the requested visual style, camera framing, setting, lighting, characters, wardrobe, and action
+- Do NOT include dialogue quotes
+- Do NOT include speech bubbles, captions, subtitles, comic panels, manga layout, poster text, labels, or any readable text
+- Prefer photorealistic visual language unless the style lock clearly requests another medium
+- Respond with ONLY valid JSON in exactly this format: {"prompt": "full storyboard prompt here"}
+"""
 
 
 def _crop_to_video_ar(image_path: str, target_w: int = 1024, target_h: int = 432):
@@ -300,22 +313,204 @@ def _keyframe_prompt_suffix() -> str:
     )
 
 
-def _build_keyframe_prompt(scene: dict, brief: str = "") -> str:
-    """Create a visual-only prompt for keyframe generation."""
-    from director import write_prompt
+def _style_for_keyframe(brief: str = "") -> str:
+    from director import get_style_anchor
 
-    image_scene = copy.deepcopy(scene)
-    image_scene["dialogue"] = ""
-    image_scene["audio_description"] = ""
-    base_prompt = write_prompt(image_scene, brief=brief).strip()
-    return base_prompt + _keyframe_prompt_suffix()
+    style = (get_style_anchor() or "").strip()
+    if style:
+        return style
+    if "pixar" in brief.lower() or "animation" in brief.lower() or "anime" in brief.lower():
+        return brief.strip()
+    return "Photorealistic cinematic still frame, natural lighting, realistic textures, grounded composition"
+
+
+def _keyframe_prompt_context(scene: dict, characters: dict, brief: str = "") -> str:
+    style = _style_for_keyframe(brief)
+    lines = []
+    if style:
+        lines.append(f"STYLE LOCK:\n{style}")
+    lines.append(f"SCENE DESCRIPTION:\n{(scene.get('description') or '').strip()}")
+    lines.append(f"SHOT TYPE:\n{(scene.get('shot_type') or 'cinematic shot').strip()}")
+    lines.append(f"MOOD:\n{(scene.get('mood') or 'natural').strip()}")
+
+    action = (scene.get("action_description") or "").strip()
+    if action:
+        lines.append(f"VISIBLE ACTION:\n{action}")
+
+    setting = (scene.get("setting_description") or "").strip()
+    if setting:
+        lines.append(f"SETTING:\n{setting}")
+
+    lighting = (scene.get("lighting_description") or "").strip()
+    if lighting:
+        lines.append(f"LIGHTING:\n{lighting}")
+
+    continuity = (scene.get("continuity_notes") or "").strip()
+    if continuity and continuity.lower() != "none":
+        lines.append(f"CONTINUITY:\n{continuity}")
+
+    chars_in_scene = scene.get("characters_in_scene", []) or []
+    if chars_in_scene:
+        char_lines = []
+        for char_id in chars_in_scene:
+            desc = (characters or {}).get(char_id, "").strip()
+            if desc:
+                char_lines.append(f"{char_id}: {desc}")
+            else:
+                char_lines.append(f"{char_id}: physically specific realistic character design")
+        lines.append("CHARACTERS:\n" + "\n".join(char_lines))
+
+    lines.append(
+        "IMPORTANT:\n"
+        "- single still storyboard frame\n"
+        "- no speech bubbles\n"
+        "- no captions or subtitles\n"
+        "- no comic panels\n"
+        "- no readable text"
+    )
+    return "\n\n".join(lines)
+
+
+def _base_prompt_without_suffix(prompt: str) -> str:
+    return prompt.split("\n\nSTORYBOARD FRAME RULES:\n", 1)[0].strip()
+
+
+def _parse_keyframe_prompt_response(raw: str) -> str | None:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+
+    candidates = [raw]
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start >= 0 and end > start:
+        candidates.insert(0, raw[start:end])
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(parsed, dict):
+            for key in ("prompt", "keyframe_prompt", "image_prompt"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    return _base_prompt_without_suffix(value.strip())
+        elif isinstance(parsed, str) and parsed.strip():
+            return _base_prompt_without_suffix(parsed.strip())
+
+    return None
+
+
+def _is_valid_keyframe_prompt(prompt: str) -> bool:
+    body = _base_prompt_without_suffix(prompt)
+    words = [word for word in body.split() if any(ch.isalpha() for ch in word)]
+    if len(words) < 25:
+        return False
+    if len(body) < 160:
+        return False
+    lowered = body.lower()
+    if lowered in {"a", "an", "image", "storyboard", "frame"}:
+        return False
+    return True
+
+
+def _fallback_keyframe_prompt(scene: dict, characters: dict, brief: str = "") -> str:
+    """Emergency fallback if the LLM repeatedly returns unusable output."""
+    parts = []
+    style = _style_for_keyframe(brief)
+    if style:
+        parts.append(f"Visual style: {style}.")
+    parts.append(f"{(scene.get('shot_type') or 'cinematic').strip().capitalize()} storyboard frame.")
+    if scene.get("description"):
+        parts.append(str(scene["description"]).strip())
+    if scene.get("action_description"):
+        parts.append(f"Visible action: {str(scene['action_description']).strip()}.")
+    if scene.get("setting_description"):
+        parts.append(f"Environment: {str(scene['setting_description']).strip()}.")
+    if scene.get("lighting_description"):
+        parts.append(f"Lighting: {str(scene['lighting_description']).strip()}.")
+    chars_in_scene = scene.get("characters_in_scene", []) or []
+    if chars_in_scene:
+        char_bits = []
+        for char_id in chars_in_scene:
+            desc = (characters or {}).get(char_id, "").strip()
+            if desc:
+                char_bits.append(f"{char_id}: {desc}")
+        if char_bits:
+            parts.append("Characters: " + " ".join(char_bits) + ".")
+    parts.append("Single realistic film frame, no comic layout, no manga paneling, no illustrated speech bubbles, no poster design.")
+    return " ".join(parts) + _keyframe_prompt_suffix()
+
+
+def _build_keyframe_prompt(scene: dict, characters: dict, brief: str = "") -> tuple[str, str]:
+    """Create a visual-only prompt for keyframe generation, written by the LLM when possible."""
+    request = _keyframe_prompt_context(scene, characters, brief)
+    temperatures = (0.45, 0.25, 0.15)
+
+    for attempt, temperature in enumerate(temperatures, start=1):
+        messages = [
+            {"role": "system", "content": KEYFRAME_PROMPT_SYSTEM},
+            {"role": "user", "content": request},
+        ]
+        response = llm_chat(
+            model=OLLAMA_MODEL_CREATIVE,
+            messages=messages,
+            options={"num_predict": 1024, "temperature": temperature},
+        )
+        raw = response["message"]["content"].strip()
+        prompt_body = _parse_keyframe_prompt_response(raw)
+        if prompt_body:
+            prompt = prompt_body + _keyframe_prompt_suffix()
+            if _is_valid_keyframe_prompt(prompt):
+                return prompt, "llm"
+            log.warning("Keyframe prompt attempt %d was too short after JSON parse: %r", attempt, prompt_body[:160])
+        else:
+            log.warning("Keyframe prompt attempt %d returned invalid JSON: %r", attempt, raw[:160])
+
+        repair_messages = messages + [
+            {"role": "assistant", "content": raw},
+            {
+                "role": "user",
+                "content": (
+                    'That response was invalid. Return ONLY valid JSON in exactly this form: '
+                    '{"prompt": "full storyboard prompt here"}. '
+                    "The prompt must be detailed, visual, single-frame, and contain no readable text, captions, or speech bubbles."
+                ),
+            },
+        ]
+        repair_response = llm_chat(
+            model=OLLAMA_MODEL_CREATIVE,
+            messages=repair_messages,
+            options={"num_predict": 1024, "temperature": 0.1},
+        )
+        repair_raw = repair_response["message"]["content"].strip()
+        repaired_body = _parse_keyframe_prompt_response(repair_raw)
+        if repaired_body:
+            prompt = repaired_body + _keyframe_prompt_suffix()
+            if _is_valid_keyframe_prompt(prompt):
+                return prompt, "llm"
+            log.warning("Keyframe prompt repair %d was still too short: %r", attempt, repaired_body[:160])
+        else:
+            log.warning("Keyframe prompt repair %d still returned invalid JSON: %r", attempt, repair_raw[:160])
+
+    log.warning("Falling back to deterministic keyframe prompt after repeated malformed LLM responses.")
+    return _fallback_keyframe_prompt(scene, characters, brief), "fallback"
 
 
 def _needs_keyframe_prompt_refresh(scene: dict) -> bool:
     prompt = scene.get("keyframe_prompt", "")
     if not prompt:
         return True
-    return "STORYBOARD FRAME RULES:" not in prompt
+    if scene.get("keyframe_prompt_source") not in {"llm", "llm_rewrite"}:
+        return True
+    stripped = prompt.strip()
+    if "STORYBOARD FRAME RULES:" not in stripped:
+        return True
+    if len(stripped.replace("STORYBOARD FRAME RULES:", "").strip()) < 80:
+        return True
+    return False
 
 
 def _run_keyframe_round(client, template: dict, scene: dict, characters: dict,
@@ -388,7 +583,7 @@ def generate_keyframes(client, scene: dict, characters: dict,
 
     # Write an image-specific prompt that strips dialogue to avoid burned-in captions.
     if _needs_keyframe_prompt_refresh(scene):
-        scene["keyframe_prompt"] = _build_keyframe_prompt(scene, brief=brief)
+        scene["keyframe_prompt"], scene["keyframe_prompt_source"] = _build_keyframe_prompt(scene, characters, brief=brief)
 
     prompt = scene["keyframe_prompt"]
     log.info("  Image prompt (%d words):", len(prompt.split()))
@@ -416,7 +611,10 @@ def generate_keyframes(client, scene: dict, characters: dict,
 
     log.info("  All %d candidates failed. Rewriting prompt based on failures...", KF_CANDIDATES)
     new_prompt = _rewrite_keyframe_prompt(scene, fail_reasons, prompt)
+    if "STORYBOARD FRAME RULES:" not in new_prompt:
+        new_prompt = new_prompt.strip() + _keyframe_prompt_suffix()
     scene["keyframe_prompt"] = new_prompt
+    scene["keyframe_prompt_source"] = "llm_rewrite"
 
     log.info("  Rewritten prompt (%d words):", len(new_prompt.split()))
     for line in new_prompt.split("\n"):

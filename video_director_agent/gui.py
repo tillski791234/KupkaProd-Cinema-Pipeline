@@ -233,12 +233,16 @@ class DirectorGUI:
             llm_url_var = tk.StringVar(value=_get("llm_base_url"))
             ttk.Entry(frame, textvariable=llm_url_var, width=55).pack(anchor="w", pady=(2, 8))
 
-            ttk.Label(frame, text="LLM Model (for planning + evaluation):", style="Wiz.TLabel").pack(anchor="w")
-            model_var = tk.StringVar(value=_get("ollama_model_fast"))
-            ttk.Entry(frame, textvariable=model_var, width=40).pack(anchor="w", pady=(2, 8))
+            ttk.Label(frame, text="LLM Creative Model (prompt writing):", style="Wiz.TLabel").pack(anchor="w")
+            creative_model_var = tk.StringVar(value=_get("ollama_model_creative"))
+            ttk.Entry(frame, textvariable=creative_model_var, width=40).pack(anchor="w", pady=(2, 8))
+
+            ttk.Label(frame, text="LLM Fast Model (evaluation/helpers):", style="Wiz.TLabel").pack(anchor="w")
+            fast_model_var = tk.StringVar(value=_get("ollama_model_fast"))
+            ttk.Entry(frame, textvariable=fast_model_var, width=40).pack(anchor="w", pady=(2, 8))
 
             # Store vars for save
-            frame._settings_vars = (comfy_var, output_var, launcher_var, provider_var, llm_url_var, model_var)
+            frame._settings_vars = (comfy_var, output_var, launcher_var, provider_var, llm_url_var, creative_model_var, fast_model_var)
 
         # --- PAGE 7: Ready ---
         def page_ready(frame):
@@ -323,7 +327,7 @@ class DirectorGUI:
                         # Need to find the settings frame - check if vars exist
                         break
                     if hasattr(frame, '_settings_vars'):
-                        comfy_var, output_var, launcher_var, provider_var, llm_url_var, model_var = frame._settings_vars
+                        comfy_var, output_var, launcher_var, provider_var, llm_url_var, creative_model_var, fast_model_var = frame._settings_vars
                         save_user_settings({
                             "comfyui_root": comfy_var.get(),
                             "project_output_root": output_var.get(),
@@ -331,8 +335,8 @@ class DirectorGUI:
                             "llm_provider": provider_var.get(),
                             "llm_base_url": llm_url_var.get(),
                             "ollama_host": llm_url_var.get(),
-                            "ollama_model_creative": model_var.get(),
-                            "ollama_model_fast": model_var.get(),
+                            "ollama_model_creative": creative_model_var.get(),
+                            "ollama_model_fast": fast_model_var.get(),
                         })
                     break
 
