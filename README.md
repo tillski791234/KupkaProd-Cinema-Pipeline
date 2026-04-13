@@ -1,3 +1,13 @@
+This fork includes:
+- webui for headless servers (see readme)
+- external API call instead of Ollama (configurable), but keep on Gemma4 26b (best for this)
+- cleaning paths for linux/general purpose, too much win pinning
+- cleaning out these damned text captions and subtitles ;-) (ZiT got the whole prompt with direct speech and did captions for this)
+- bugfixes
+
+Thanks a lot to Matticusnicholas - I have a lot of fun with this! Great work!
+
+
 # KupkaProd Cinema Pipeline
 
 **Powered by LTX 2.3**
