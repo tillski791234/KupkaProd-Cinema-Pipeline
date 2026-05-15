@@ -16,7 +16,9 @@ import logging
 import os
 import random
 import re
+import shutil
 import sys
+import tempfile
 import time
 from datetime import datetime
 
@@ -37,6 +39,8 @@ from llm_client import ensure_model_available, provider_label, unload_model
 import director
 import evaluator
 import assembler
+
+log = logging.getLogger(__name__)
 
 # ── Logging ────────────────────────────────────────────────────────────────
 
@@ -62,19 +66,88 @@ def state_path(project_name: str) -> str:
     return project_state_path(project_name)
 
 
+def _state_backup_path(path: str) -> str:
+    return f"{path}.bak"
+
+
+def _load_json_file(path: str, retries: int = 3, delay: float = 0.05) -> dict | None:
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                raw = handle.read()
+            if not raw.strip():
+                raise json.JSONDecodeError("Empty JSON file", raw, 0)
+            return json.loads(raw)
+        except (OSError, json.JSONDecodeError) as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(delay * (attempt + 1))
+
+    backup_path = _state_backup_path(path)
+    if os.path.exists(backup_path):
+        try:
+            with open(backup_path, encoding="utf-8") as handle:
+                raw = handle.read()
+            if raw.strip():
+                log.warning("Recovered state from backup after JSON read failure: %s", path)
+                return json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    if isinstance(last_error, json.JSONDecodeError):
+        log.warning("State file is unreadable JSON: %s", path)
+        return None
+    raise last_error
+
+
+def _save_json_file(path: str, payload: dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    backup_path = _state_backup_path(path)
+    fd, tmp_path = tempfile.mkstemp(prefix=".state_", suffix=".tmp", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.path.exists(path):
+            try:
+                shutil.copy2(path, backup_path)
+            except OSError:
+                pass
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 def load_state(project_name: str) -> dict | None:
     path = state_path(project_name)
     if os.path.exists(path):
-        with open(path) as f:
-            return json.load(f)
+        return _load_json_file(path)
     return None
 
 
 def save_state(state: dict):
     path = state_path(state["project_name"])
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(state, f, indent=2)
+    _save_json_file(path, state)
+
+
+def _llm_runtime_snapshot() -> dict:
+    snapshot = config.get_settings_snapshot()
+    return {
+        "provider": snapshot.get("llm_provider"),
+        "base_url": snapshot.get("llm_base_url"),
+        "enable_thinking": snapshot.get("llm_enable_thinking"),
+        "reasoning_breakdown_only": snapshot.get("llm_reasoning_breakdown_only"),
+        "reasoning_format": snapshot.get("llm_reasoning_format"),
+        "creative_drafting_mode": snapshot.get("llm_creative_drafting_mode"),
+        "model_creative": snapshot.get("ollama_model_creative"),
+        "model_fast": snapshot.get("ollama_model_fast"),
+    }
 
 
 def create_state(project_name: str, brief: str) -> dict:
@@ -82,6 +155,7 @@ def create_state(project_name: str, brief: str) -> dict:
         "project_name": project_name,
         "brief": brief,
         "created_at": datetime.now().isoformat(),
+        "llm_runtime": _llm_runtime_snapshot(),
         "total_scenes": 0,
         "scenes": [],
     }
@@ -170,7 +244,7 @@ def slugify(text: str) -> str:
 
 # ── Main Pipeline ──────────────────────────────────────────────────────────
 
-def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool = False):
+def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool = False, should_cancel=None):
     """Full autonomous pipeline."""
     state = load_state(project_name)
     if state:
@@ -179,16 +253,33 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
         state.setdefault("scenes", [])
         state.setdefault("total_scenes", len(state.get("scenes", [])))
         state.setdefault("is_script", is_script)
+        state.pop("cancel_requested_at", None)
+        state.pop("cancelled_at", None)
+        state["llm_runtime"] = _llm_runtime_snapshot()
         log.info("Resuming project '%s' (%d scenes planned)", project_name, state["total_scenes"])
     else:
         state = create_state(project_name, brief)
         state["is_script"] = is_script
+        state.pop("cancel_requested_at", None)
+        state.pop("cancelled_at", None)
         log.info("New project '%s'", project_name)
+
+    def cancel_if_requested(where: str) -> bool:
+        if should_cancel and should_cancel():
+            state["cancelled_at"] = datetime.now().isoformat()
+            save_state(state)
+            log.info("Cancellation requested. Stopping pipeline at %s.", where)
+            return True
+        return False
 
     client = ComfyUIClient()
     client.connect()
     template = load_workflow_template()
     i2v_template = load_i2v_template()  # None if i2v_template.json not available
+
+    if cancel_if_requested("startup"):
+        client.disconnect()
+        return
 
     # ── Phase 1: Scene Breakdown ───────────────────────────────────────
     if not state["scenes"]:
@@ -199,7 +290,14 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
         state["scenes"] = scenes
         state["total_scenes"] = len(scenes)
         # Store character + voice + style descriptions from breakdown
-        from director import get_character_descriptions, get_voice_descriptions, get_style_anchor
+        from director import (
+            get_character_descriptions,
+            get_last_planning_debug,
+            get_location_anchors,
+            get_story_world,
+            get_voice_descriptions,
+            get_style_anchor,
+        )
         chars = get_character_descriptions()
         if chars:
             state["characters"] = chars
@@ -208,10 +306,22 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
         if voices:
             state["voices"] = voices
             log.info("Stored %d voice descriptions.", len(voices))
+        locations = get_location_anchors()
+        if locations:
+            state["locations"] = locations
+            log.info("Stored %d location anchors.", len(locations))
         style = get_style_anchor()
         if style:
             state["style"] = style
             log.info("Stored style anchor: %s", style[:80])
+        story_world = get_story_world()
+        if story_world:
+            state["story_world"] = story_world
+            log.info("Stored story world anchor: %s", story_world[:100])
+        planning_debug = get_last_planning_debug()
+        if planning_debug:
+            state["planning_debug"] = planning_debug
+            log.info("Stored planning debug in state.json")
         save_state(state)
         log.info("Planned %d scenes.", len(scenes))
 
@@ -231,9 +341,15 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
     voices = state.get("voices", {})
     if voices:
         director._current_voices = voices
+    locations = state.get("locations", {})
+    if locations:
+        director._current_locations = locations
     style = state.get("style", "")
     if style:
         director._current_style = style
+    story_world = state.get("story_world", "")
+    if story_world:
+        director._current_story_world = story_world
 
     # ── Phase 2: Storyboard (keyframe generation) ─────────────────────
     if USE_KEYFRAMES and not state.get("storyboard_approved"):
@@ -244,6 +360,9 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
         from keyframe_gen import generate_keyframes
 
         for i, scene in enumerate(scenes):
+            if cancel_if_requested(f"storyboard scene {scene.get('scene_number')}"):
+                client.disconnect()
+                return
             if scene.get("keyframe_candidates") and not scene.get("rejection_notes"):
                 continue  # Already generated and not rejected
 
@@ -312,6 +431,9 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
 
     import shutil
     for i, scene in enumerate(scenes):
+        if cancel_if_requested(f"video scene {scene.get('scene_number')}"):
+            client.disconnect()
+            return
         if scene.get("takes_done"):
             continue
 
@@ -323,6 +445,8 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
         prev_scene = scenes[i - 1] if i > 0 else None
 
         # Write video prompt once per scene
+        if getattr(config, "NO_DIALOGUE", False):
+            director._strip_dialogue_from_scenes([scene])
         if not scene.get("ltx_prompt"):
             scene["ltx_prompt"] = director.write_prompt(scene, prev_scene, brief=brief)
 
@@ -345,6 +469,9 @@ def run(brief: str, project_name: str, log, is_script: bool = False, lazy: bool 
                 use_i2v = False
 
         for take_num in range(1, TAKES_PER_SCENE + 1):
+            if cancel_if_requested(f"scene {scene_num} before take {take_num}"):
+                client.disconnect()
+                return
             if take_num <= len(scene["takes"]):
                 continue
 

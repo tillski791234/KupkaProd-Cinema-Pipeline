@@ -233,6 +233,37 @@ class DirectorGUI:
             llm_url_var = tk.StringVar(value=_get("llm_base_url"))
             ttk.Entry(frame, textvariable=llm_url_var, width=55).pack(anchor="w", pady=(2, 8))
 
+            llm_thinking_var = tk.BooleanVar(value=str(_get("llm_enable_thinking")).strip().lower() in ("1", "true", "yes", "on"))
+            ttk.Checkbutton(
+                frame,
+                text="Enable llama.cpp thinking mode",
+                variable=llm_thinking_var,
+            ).pack(anchor="w", pady=(2, 8))
+
+            llm_breakdown_only_var = tk.BooleanVar(value=str(_get("llm_reasoning_breakdown_only")).strip().lower() in ("1", "true", "yes", "on"))
+            ttk.Checkbutton(
+                frame,
+                text="Reasoning only for breakdown",
+                variable=llm_breakdown_only_var,
+            ).pack(anchor="w", pady=(0, 8))
+
+            llm_creative_drafting_var = tk.BooleanVar(value=str(_get("llm_creative_drafting_mode")).strip().lower() in ("1", "true", "yes", "on"))
+            ttk.Checkbutton(
+                frame,
+                text="Creative drafting mode",
+                variable=llm_creative_drafting_var,
+            ).pack(anchor="w", pady=(0, 8))
+
+            ttk.Label(frame, text="LLM reasoning format:", style="Wiz.TLabel").pack(anchor="w")
+            llm_reasoning_var = tk.StringVar(value=_get("llm_reasoning_format"))
+            ttk.Combobox(
+                frame,
+                textvariable=llm_reasoning_var,
+                values=("none", "deepseek"),
+                state="readonly",
+                width=24,
+            ).pack(anchor="w", pady=(2, 8))
+
             ttk.Label(frame, text="LLM Creative Model (prompt writing):", style="Wiz.TLabel").pack(anchor="w")
             creative_model_var = tk.StringVar(value=_get("ollama_model_creative"))
             ttk.Entry(frame, textvariable=creative_model_var, width=40).pack(anchor="w", pady=(2, 8))
@@ -242,7 +273,19 @@ class DirectorGUI:
             ttk.Entry(frame, textvariable=fast_model_var, width=40).pack(anchor="w", pady=(2, 8))
 
             # Store vars for save
-            frame._settings_vars = (comfy_var, output_var, launcher_var, provider_var, llm_url_var, creative_model_var, fast_model_var)
+            frame._settings_vars = (
+                comfy_var,
+                output_var,
+                launcher_var,
+                provider_var,
+                llm_url_var,
+                llm_thinking_var,
+                llm_breakdown_only_var,
+                llm_creative_drafting_var,
+                llm_reasoning_var,
+                creative_model_var,
+                fast_model_var,
+            )
 
         # --- PAGE 7: Ready ---
         def page_ready(frame):
@@ -327,13 +370,29 @@ class DirectorGUI:
                         # Need to find the settings frame - check if vars exist
                         break
                     if hasattr(frame, '_settings_vars'):
-                        comfy_var, output_var, launcher_var, provider_var, llm_url_var, creative_model_var, fast_model_var = frame._settings_vars
+                        (
+                            comfy_var,
+                            output_var,
+                            launcher_var,
+                            provider_var,
+                            llm_url_var,
+                            llm_thinking_var,
+                            llm_breakdown_only_var,
+                            llm_creative_drafting_var,
+                            llm_reasoning_var,
+                            creative_model_var,
+                            fast_model_var,
+                        ) = frame._settings_vars
                         save_user_settings({
                             "comfyui_root": comfy_var.get(),
                             "project_output_root": output_var.get(),
                             "comfyui_launcher": launcher_var.get(),
                             "llm_provider": provider_var.get(),
                             "llm_base_url": llm_url_var.get(),
+                            "llm_enable_thinking": bool(llm_thinking_var.get()),
+                            "llm_reasoning_breakdown_only": bool(llm_breakdown_only_var.get()),
+                            "llm_creative_drafting_mode": bool(llm_creative_drafting_var.get()),
+                            "llm_reasoning_format": llm_reasoning_var.get(),
                             "ollama_host": llm_url_var.get(),
                             "ollama_model_creative": creative_model_var.get(),
                             "ollama_model_fast": fast_model_var.get(),

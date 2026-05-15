@@ -9,20 +9,35 @@ import logging
 import urllib.request
 import websocket
 
+import config
 from config import (
     COMFYUI_HOST, COMFYUI_OUTPUT_DIR,
     PROMPT_NODE_ID, NEG_PROMPT_NODE_ID, FRAMES_NODE_ID,
     SEED_NODE_ID_PASS1, SEED_NODE_ID_PASS2,
     VIDEO_RES_NODE_ID, VIDEO_WIDTH, VIDEO_HEIGHT,
-    LTX_FPS, NEGATIVE_PROMPT,
+    LTX_FPS,
 )
 
 log = logging.getLogger(__name__)
 
 
+def _resolve_history_output_path(output_dir: str, subfolder: str, filename: str) -> str:
+    base_dir = os.path.abspath(output_dir)
+    clean_subfolder = str(subfolder or "").strip().replace("\\", os.sep).replace("/", os.sep)
+    clean_subfolder = os.path.normpath(clean_subfolder) if clean_subfolder else ""
+    if clean_subfolder in {"", "."}:
+        return os.path.join(base_dir, filename)
+    if os.path.isabs(clean_subfolder):
+        return os.path.join(clean_subfolder, filename)
+    normalized_base = os.path.normpath(base_dir)
+    if normalized_base == clean_subfolder or normalized_base.endswith(os.sep + clean_subfolder):
+        return os.path.join(base_dir, filename)
+    return os.path.join(base_dir, clean_subfolder, filename)
+
+
 class ComfyUIClient:
-    def __init__(self, host: str = COMFYUI_HOST):
-        self.host = host
+    def __init__(self, host: str | None = None):
+        self.host = host or COMFYUI_HOST
         self.client_id = str(uuid.uuid4())
         self.ws = None
 
@@ -180,8 +195,9 @@ class ComfyUIClient:
         return data.get(prompt_id, {})
 
     @staticmethod
-    def get_output_path(history: dict, output_dir: str = COMFYUI_OUTPUT_DIR) -> str:
+    def get_output_path(history: dict, output_dir: str | None = None) -> str:
         """Extract the video file path from a completed history dict."""
+        output_dir = output_dir or COMFYUI_OUTPUT_DIR
         outputs = history.get("outputs", {})
         for node_id, node_output in outputs.items():
             # Check all possible output keys: SaveVideo uses "images" with animated flag,
@@ -195,7 +211,7 @@ class ComfyUIClient:
                         filename = item.get("filename", "")
                         if filename.endswith((".mp4", ".webm", ".avi", ".mov")):
                             subfolder = item.get("subfolder", "")
-                            return os.path.join(output_dir, subfolder, filename)
+                            return _resolve_history_output_path(output_dir, subfolder, filename)
         raise ValueError("No video output found in history")
 
 
@@ -284,7 +300,7 @@ def build_workflow(template: dict, prompt_text: str, frames: int, seed: int) -> 
     wf = copy.deepcopy(template)
     nodes = _detect_video_nodes(wf)
     wf[nodes["prompt"]]["inputs"]["text"] = prompt_text
-    wf[nodes["neg_prompt"]]["inputs"]["text"] = NEGATIVE_PROMPT
+    wf[nodes["neg_prompt"]]["inputs"]["text"] = config.effective_negative_prompt()
     wf[nodes["frames"]]["inputs"]["value"] = frames
     wf[nodes["seed1"]]["inputs"]["noise_seed"] = seed
     wf[nodes["seed2"]]["inputs"]["noise_seed"] = seed + 1
@@ -404,7 +420,7 @@ def build_i2v_workflow(template: dict, prompt_text: str, frames: int, seed: int,
 
     # Set negative prompt
     if "neg_prompt" in nodes:
-        wf[nodes["neg_prompt"]]["inputs"]["text"] = NEGATIVE_PROMPT
+        wf[nodes["neg_prompt"]]["inputs"]["text"] = config.effective_negative_prompt()
 
     # Set frame count
     if "frames" in nodes:

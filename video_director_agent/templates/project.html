@@ -7,9 +7,12 @@
     <a class="subtle-link" href="/">Back to dashboard</a>
     <h1>{{ project_name }}</h1>
     <p class="phase-line">
-      <span id="phase-label" class="status-pill {% if job.running %}running{% endif %}">{{ phase }}</span>
+      <span id="phase-label" class="status-pill {% if job.running %}running{% elif job.queued %}queued{% endif %}">{{ phase }}</span>
       <span id="scene-metrics">{{ state.scenes|length if state.scenes else 0 }} scenes</span>
     </p>
+    {% if queue_position %}
+      <p id="queue-position-line" class="muted">Queue position: <span id="queue-position-value">{{ queue_position }}</span></p>
+    {% endif %}
   </div>
 
   <div class="button-row">
@@ -20,18 +23,36 @@
       <input type="hidden" name="scene_min" value="{{ project_runtime.scene_min }}">
       <input type="hidden" name="scene_max" value="{{ project_runtime.scene_max }}">
       <input type="hidden" name="subtitle_safe" value="{% if project_runtime.subtitle_safe %}1{% endif %}">
+      <input type="hidden" name="character_focus" value="{{ project_runtime.character_focus }}">
+      <input type="hidden" name="action_focus" value="{{ project_runtime.action_focus }}">
+      <input type="hidden" name="environment_weight" value="{{ project_runtime.environment_weight }}">
+      <input type="hidden" name="establishing_shot_bias" value="{{ project_runtime.establishing_shot_bias }}">
+      <input type="hidden" name="natural_dialogue" value="{% if project_runtime.natural_dialogue %}1{% endif %}">
+      <input type="hidden" name="no_dialogue" value="{% if project_runtime.no_dialogue %}1{% endif %}">
+      <input type="hidden" name="zit_direct_prompt" value="{{ project_runtime.zit_direct_prompt }}">
       <input type="hidden" name="kf_width" value="{{ project_runtime.kf_width }}">
       <input type="hidden" name="kf_height" value="{{ project_runtime.kf_height }}">
       <input type="hidden" name="video_width" value="{{ project_runtime.video_width }}">
       <input type="hidden" name="video_height" value="{{ project_runtime.video_height }}">
       <input type="hidden" name="comfyui_root" value="{{ settings.comfyui_root }}">
+      <input type="hidden" name="comfyui_output_dir" value="{{ settings.comfyui_output_dir }}">
+      <input type="hidden" name="comfyui_host" value="{{ settings.comfyui_host }}">
       <input type="hidden" name="comfyui_launcher" value="{{ settings.comfyui_launcher }}">
+      <input type="hidden" name="kf_prompt_node_id" value="{{ settings.kf_prompt_node_id }}">
+      <input type="hidden" name="kf_prompt_input_name" value="{{ settings.kf_prompt_input_name }}">
       <input type="hidden" name="llm_provider" value="{{ settings.llm_provider }}">
       <input type="hidden" name="llm_base_url" value="{{ settings.llm_base_url }}">
       <input type="hidden" name="llm_model_creative" value="{{ settings.llm_model_creative }}">
       <input type="hidden" name="llm_model_fast" value="{{ settings.llm_model_fast }}">
-      <button class="btn btn-primary" type="submit" {% if job.running %}disabled{% endif %}>Resume Production</button>
+      <button class="btn btn-primary" type="submit" {% if job.running or job.queued %}disabled{% endif %}>Resume Production</button>
     </form>
+    {% if job.running or job.queued %}
+      <form action="/projects/{{ project_name }}/cancel" method="post" class="inline-form">
+        <button class="btn btn-outline-secondary" type="submit">
+          {% if job.queued %}Remove From Queue{% elif job.cancel_requested %}Stopping…{% else %}Abort Production{% endif %}
+        </button>
+      </form>
+    {% endif %}
   </div>
 </section>
 
@@ -72,6 +93,9 @@
   <div class="panel-head">
     <h2>Storyboard Review</h2>
     <p>Select approved keyframes or mark scenes for regeneration before resuming production.</p>
+    <form action="/projects/{{ project_name }}/storyboard/select-all" method="post" class="inline-form js-preserve-scroll">
+      <button class="btn btn-outline-secondary btn-sm" type="submit">Select first keyframe for all open scenes</button>
+    </form>
   </div>
 
   {% for entry in storyboard_scenes %}
@@ -132,6 +156,9 @@
   <div class="panel-head">
     <h2>Take Review</h2>
     <p>Choose one generated take per scene, then assemble the final film.</p>
+    <form action="/projects/{{ project_name }}/takes/select-all" method="post" class="inline-form js-preserve-scroll">
+      <button class="btn btn-outline-secondary btn-sm" type="submit">Select first take for all open scenes</button>
+    </form>
   </div>
 
   {% for entry in take_scenes %}
@@ -205,6 +232,8 @@
     const storyboardState = document.getElementById("storyboard-state");
     const generationState = document.getElementById("generation-state");
     const finalState = document.getElementById("final-state");
+    const queuePositionLine = document.getElementById("queue-position-line");
+    const queuePositionValue = document.getElementById("queue-position-value");
     let wasRunning = {{ "true" if job.running else "false" }};
     let logPinnedToBottom = true;
 
@@ -241,6 +270,7 @@
       const data = await response.json();
       phaseLabel.textContent = data.phase;
       phaseLabel.classList.toggle("running", Boolean(data.running));
+      phaseLabel.classList.toggle("queued", Boolean(data.queued));
       totalScenes.textContent = data.total_scenes;
       if (keyframeCount) keyframeCount.textContent = data.approved_keyframes;
       if (takeCount) takeCount.textContent = data.selected_takes;
@@ -248,6 +278,14 @@
       storyboardState.textContent = data.storyboard_approved ? "yes" : "no";
       generationState.textContent = data.generation_completed ? "yes" : "no";
       finalState.textContent = data.final_url ? "ready" : "pending";
+      if (queuePositionLine && queuePositionValue) {
+        if (data.queued && data.queue_position) {
+          queuePositionLine.hidden = false;
+          queuePositionValue.textContent = data.queue_position;
+        } else {
+          queuePositionLine.hidden = true;
+        }
+      }
       logBox.textContent = data.logs || "";
       if (logPinnedToBottom) {
         logBox.scrollTop = logBox.scrollHeight;

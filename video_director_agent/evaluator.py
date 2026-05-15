@@ -5,6 +5,7 @@ import json
 import logging
 import cv2
 
+import config
 from config import OLLAMA_MODEL_FAST, EVAL_FRAME_SAMPLE_RATE, EVAL_MAX_FRAMES
 from llm_client import chat as llm_chat
 
@@ -120,6 +121,7 @@ Respond with valid JSON:
             "num_predict": 1024,   # More tokens for thorough reasoning
             "num_ctx": 8192,
             "temperature": 0.3,    # Low temp for consistent, analytical evaluation
+            **config.llm_reasoning_options(for_breakdown=False),
         },
     )
 

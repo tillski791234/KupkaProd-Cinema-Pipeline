@@ -1,5 +1,6 @@
 {
   "llm_provider": "openai_compatible",
   "llm_base_url": "http://10.0.10.44:8080/v1",
-  "ollama_host": "http://10.0.10.44:8080/v1"
+  "ollama_host": "http://10.0.10.44:8080/v1",
+  "llm_creative_drafting_mode": true
 }

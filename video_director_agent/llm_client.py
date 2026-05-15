@@ -1,6 +1,7 @@
 """Small adapter that supports Ollama and OpenAI-compatible chat endpoints."""
 
 import logging
+import re
 from typing import Any
 
 import requests
@@ -93,6 +94,33 @@ def _extract_content_from_openai_message(content: Any) -> str:
     return str(content)
 
 
+def _normalize_reasoning_output(content: str) -> tuple[str, str | None]:
+    """Extract user-facing content from llama.cpp/Gemma reasoning channel wrappers."""
+    text = (content or "").strip()
+    if not text:
+        return "", None
+
+    # Common llama.cpp/Gemma wrapper:
+    # <|channel>thought
+    # <channel|>final answer
+    channel_match = re.match(
+        r"^\s*<\|channel\>([a-zA-Z0-9_\-]+)\s*[\r\n]*<channel\|>\s*(.*)\s*$",
+        text,
+        flags=re.DOTALL,
+    )
+    if channel_match:
+        channel = channel_match.group(1).strip().lower()
+        body = channel_match.group(2).strip()
+        if channel in {"thought", "thinking", "reasoning", "analysis"}:
+            return body, None
+        return body, channel
+
+    # Fallback: strip stray channel markers if the model leaked them verbatim.
+    cleaned = re.sub(r"<\|channel\>[a-zA-Z0-9_\-]+", "", text)
+    cleaned = cleaned.replace("<channel|>", "").strip()
+    return cleaned, None
+
+
 def list_models(force_refresh: bool = False) -> list[str]:
     global _cached_models
 
@@ -166,12 +194,20 @@ def chat(model: str, messages: list[dict[str, Any]], options: dict[str, Any] | N
         "model": request_model,
         "messages": _build_openai_messages(messages),
     }
+    reasoning_format = options.get("reasoning_format", getattr(config, "LLM_REASONING_FORMAT", ""))
+    enable_thinking = options.get("enable_thinking", getattr(config, "LLM_ENABLE_THINKING", False))
+    if reasoning_format:
+        payload["reasoning_format"] = reasoning_format
+    if enable_thinking:
+        payload["chat_template_kwargs"] = {"enable_thinking": True}
     if "temperature" in options:
         payload["temperature"] = options["temperature"]
     if "num_predict" in options:
         payload["max_tokens"] = options["num_predict"]
     if "stop" in options:
         payload["stop"] = options["stop"]
+    if "response_format" in options:
+        payload["response_format"] = options["response_format"]
 
     response = requests.post(
         f"{_openai_base_url()}/chat/completions",
@@ -183,12 +219,24 @@ def chat(model: str, messages: list[dict[str, Any]], options: dict[str, Any] | N
     data = response.json()
 
     try:
-        content = _extract_content_from_openai_message(data["choices"][0]["message"]["content"])
+        raw_message = data["choices"][0]["message"]
+        content = _extract_content_from_openai_message(raw_message.get("content"))
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError(f"Unexpected chat response from {provider_label()}: {data}") from exc
 
+    normalized_content, inferred_channel = _normalize_reasoning_output(content)
+    reasoning_content = raw_message.get("reasoning_content")
+    if isinstance(reasoning_content, list):
+        reasoning_content = _extract_content_from_openai_message(reasoning_content)
+    elif reasoning_content is not None:
+        reasoning_content = str(reasoning_content)
+
     return {
-        "message": {"content": content},
+        "message": {
+            "content": normalized_content,
+            "reasoning_content": reasoning_content,
+            "channel": inferred_channel,
+        },
         "raw": data,
         "model": request_model,
     }
